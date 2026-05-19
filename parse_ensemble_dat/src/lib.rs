@@ -1,73 +1,58 @@
 // parse_ensemble_dat: takes an ensemble dat file that describes a genome and
 // parses it into DNA chunks that contain proteins along with vectors that
 // describe their introns, exons, start points, and end points.
-
-
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
-use std::io::{BufRead,BufReader, Lines};
-
 use std::iter::Peekable;
+use std::io::{BufReader, Lines};
 use std::cmp::{min, max};
-use clap::Parser;
-
-
-#[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
-struct Cli {
-    infile: String,
-    proteinfile: String,
-    gapfile: String,
-}
-
 // For exons, need to know where they start and end in the contig,
 // plus whether they are complementary to the DNA sequence.
-struct Exon{
-    start: i64,
-    end: i64,
+pub struct Exon{
+    pub start: i64,
+    pub end: i64,
     complement: bool,
 }
 
 // For introns, need to know where they start and end in the contig.
 // and whether they are complementary to the DNA sequence.
-struct Intron{
-    start: i64,
-    end: i64,
+pub struct Intron{
+    pub start: i64,
+    pub end: i64,
 }
 
 
-struct Protein{
-    name: String,
-    uniprot_name: String,
-    mrna_start: i64, // Start of the mRNA within the contig
-    mrna_end: i64, // End of the mRNA within the contig
-    coding_start: i64, //start position of the coding sequence within the mRNA
-    coding_end: i64, // end position of the coding sequence within the mRNA
-    introns: Vec<Intron>,
-    exons: Vec<Exon>,
-    codon_start: i8, // How many positions (0-2) is the first codon start offset from the
+pub struct Protein{
+    pub name: String,
+    pub uniprot_name: String,
+    pub mrna_start: i64, // Start of the mRNA within the contig
+    pub mrna_end: i64, // End of the mRNA within the contig
+    pub coding_start: i64, //start position of the coding sequence within the mRNA
+    pub coding_end: i64, // end position of the coding sequence within the mRNA
+    pub introns: Vec<Intron>,
+    pub exons: Vec<Exon>,
+    pub codon_start: i8, // How many positions (0-2) is the first codon start offset from the
     // DNA sequence start
-    dna_sequence: Vec<char>,  //DNA sequence of the protein
-    protein_sequence: Vec<char>,
+    pub dna_sequence: Vec<char>,  //DNA sequence of the protein
+    pub protein_sequence: Vec<char>,
 }
 
-struct Gene{
-    name: String,
+pub struct Gene{
+    pub name: String,
   //  dna_sequence: Vec<char>,
-    proteins: Vec<Protein>,
+    pub proteins: Vec<Protein>,
 }
 
-struct Contig{
-    length: i64,
-    name: String,
-    organism: String,
-    dna_sequence: Vec<char>,
-    genes: Vec<Gene>,
+pub struct Contig{
+    pub length: i64,
+    pub name: String,
+    pub organism: String,
+    pub taxonomy: Vec<String>,
+    pub dna_sequence: Vec<char>,
+    pub genes: Vec<Gene>,
 }
 
 // find the complement of a residue
-fn complement(residue: char) -> char{
+pub fn complement(residue: char) -> char{
     match residue {
         'A' => 'T',
         'C' => 'G',
@@ -88,14 +73,14 @@ fn complement(residue: char) -> char{
     }
 }
 
-struct Gap{
-    start: i64,
-    end: i64,
-    name: String,
+pub struct Gap{
+    pub start: i64,
+    pub end: i64,
+    pub name: String,
 }
 
 // translate a codon into an amino acid
-fn translate_codon(codon: &Vec<char>) -> char{
+pub fn translate_codon(codon: &Vec<char>) -> char{
     if codon.len() != 3 { panic!("Codon must be three characters long"); }
 
     let amino_acid:char;
@@ -172,7 +157,7 @@ fn translate_codon(codon: &Vec<char>) -> char{
 }
 
 // translate a DNA sequence into a protein sequence
-fn translate_sequence(mrna_sequence: &Vec<char>, codon_start: i8) -> Vec<char>{
+pub fn translate_sequence(mrna_sequence: &Vec<char>, codon_start: i8) -> Vec<char>{
     let mut protein_sequence:Vec<char> = Vec::new();
     let dna_sequence = mrna_sequence[codon_start as usize ..].to_vec();
    // if dna_sequence.len() % 3 != 0 { panic!("DNA sequence must be a multiple of three characters long"); }
@@ -189,7 +174,7 @@ fn translate_sequence(mrna_sequence: &Vec<char>, codon_start: i8) -> Vec<char>{
 // Because the dat file gives the DNA sequence for the contig at the end of its
 // description, after we've parsed the contig, we need to go through and fill in
 // the protein sequences for each gene.  This function handles that.
-fn process_contig(contig: &mut Contig, protein_writer: &mut BufWriter<File>, gap_writer: &mut BufWriter<File> ){
+pub fn parse_contig(contig: &mut Contig){
   //  println!("Contig {} has length {} and organism {}", contig.name, contig.length, contig.organism);
     for gene in contig.genes.iter_mut() {
         for protein in gene.proteins.iter_mut() {
@@ -252,59 +237,10 @@ fn process_contig(contig: &mut Contig, protein_writer: &mut BufWriter<File>, gap
             }
         }
     }
-
-    let mut coding_regions: Vec<Gap> = Vec::new();
-    for gene in contig.genes.iter(){
-        let mut gstart:i64 = i64::MAX;
-        let mut gend:i64 = 0;
-        for protein in gene.proteins.iter(){
-            // find the coding region of this protein
-            let mut cstart = protein.mrna_start;
-            let mut cend = protein.mrna_end;
-            if cstart > cend // forget whether this can happen for complemented genes
-            {
-                println!("swapping {} and {}", cstart, cend);
-                std::mem::swap(&mut cstart, &mut cend);}
-            if cstart < gstart {gstart = cstart;}
-            if cend > gend {gend = cend;}
-        }
-        coding_regions.push(Gap{start: gstart, end: gend, name: gene.name.clone()});
-    }
-    coding_regions.sort_by_key(|gap| gap.start);
-    if coding_regions.len() > 0 {
-        //println!("Coding regions:");
-        for region in coding_regions.iter() {
-            if region.start >=region.end {
-                println!("huh! start {} is greater than end {}", region.start, region.end);
-            }
-            protein_writer.write_fmt(format_args!("{}\n", region.end - region.start +1)).unwrap();
-        }
-       // println!("Intergenic regions:");
-        let mut prev_end: i64 = 0;
-        let mut prev_name = "".to_string();
-        for region in coding_regions.iter() {
-            if region.start > prev_end {
-                gap_writer.write_fmt(format_args!("{}\n", region.start - prev_end)).unwrap();
-            }
-    /*        else{
-                if region.name != prev_name {
-                    println!("found overlapping coding regions in different genes {} and {}", region.name, prev_name);
-                }
-            }*/
-
-            if region.end > prev_end {
-                prev_end = region.end;
-                prev_name = region.name.clone();
-            }
-
-        }
-    }
-    protein_writer.flush().unwrap();
-    gap_writer.flush().unwrap();
 }
 
 // Parse the DNA sequence from the dat file
-fn parse_sequence(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Vec<char>{
+pub fn parse_sequence(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Vec<char>{
     let mut sequence:Vec<char> = Vec::new();
     let length:i64 = fields[2].parse::<i64>().unwrap();
     let mut residue_count:i64 = 0;
@@ -335,7 +271,7 @@ fn parse_sequence(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>
 
 // Parse a gene from the dat file.
 // a gene can contain multiple proteins, often because of alternative splicing
-fn parse_gene(lines: &mut Peekable<Lines<BufReader<File>>>) -> Gene{
+pub fn parse_gene(lines: &mut Peekable<Lines<BufReader<File>>>) -> Gene{
     //first, grab the start and end positions of the gene
 
     //let start:i64 = start_end[0].parse::<i64>().unwrap();
@@ -379,7 +315,7 @@ fn parse_gene(lines: &mut Peekable<Lines<BufReader<File>>>) -> Gene{
 }
 
 // parse the description of a protein from the dat file
-fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Protein{
+pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Protein{
     let mut the_protein = Protein{name: "".to_string(), uniprot_name: "".to_string(), mrna_start: 0, mrna_end: 0, coding_start:0, coding_end:0,
         introns: Vec::new(), exons: Vec::new(), codon_start: 0, dna_sequence: Vec::new(), protein_sequence: Vec::new()};
 
@@ -496,7 +432,7 @@ fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>
 
 
 // generate an intron from the string that describes it.
-fn parse_exon(exon_string: &str) -> Exon{
+pub fn parse_exon(exon_string: &str) -> Exon{
     let start_end:Vec<&str>;
     let complement:bool = exon_string.starts_with("complement");
     if !complement {
@@ -510,64 +446,44 @@ fn parse_exon(exon_string: &str) -> Exon{
     Exon{start, end, complement}
 }
 
-fn main() {
-    let args = Cli::parse();
-
-    let file = File::open(args.infile.clone()).expect(format!("Unable to open {}", args.infile).as_str());
-    let proteinfile = OpenOptions::new().create(true).append(true).open(args.proteinfile.clone());
-    let mut protein_writer = BufWriter::new(proteinfile.unwrap());
-    let gapfile= OpenOptions::new().append(true).create(true).open(args.gapfile.clone());
-    let mut gap_writer: BufWriter<File> = BufWriter::new(gapfile.unwrap());
-    let reader = BufReader::new(file);
-    let mut contig = Contig{dna_sequence: Vec::new(),
-        genes: Vec::new(),
-        length: 0,
-        organism: "".to_string(),
-        name: "".to_string()};
-    let mut lines:Peekable<Lines<BufReader<File>>> = reader.lines().peekable();
-    while let Some(line_result) = lines.next() { // there's still data in the file
-        let line = line_result.unwrap();
-        let fields = line.split_whitespace().collect::<Vec<&str>>();
-        match fields[0] {
-            "ID" => {
-                if contig.name != "" {
-                    process_contig(&mut contig, &mut protein_writer, & mut gap_writer);
-                }
-                contig = Contig { dna_sequence: Vec::new(), genes: Vec::new(), length: 0, organism: "".to_string(), name: "".to_string() };
-                contig.name = fields[1].to_string();
-                contig.length = fields[5].parse::<i64>().unwrap();
-                //           println!("contig length is {}", contig.length);
-            },
-            "OS" => {
-                contig.organism = fields[1..].join(" ").to_string();
-            },
-            "FT" => {
-                if fields[1] == "gene" {
-                    let temp_gene = parse_gene(&mut lines);
-                    if temp_gene.proteins.len() > 0 {
-                        contig.genes.push(temp_gene);
-                    }
-                } else {};
-            }
-            "SQ" => {
-                contig.dna_sequence = parse_sequence(fields, &mut lines);
-            },
-            "//" => {
-                process_contig(&mut contig, & mut protein_writer, & mut gap_writer);
-            },
-            "XX" => {}, // spacer line
-            "AC" => {}, // accession line, we don't care about this
-            "SV" => {}, // sequence version line, we don't care about this
-            "DT" => {}, // date line, we don't care about this
-            "DE" => {}, // description line, we don't care about this
-            "KW" => {}, // keywords line, we don't care about this
-            "OC" => {}, // organism classification line, we don't care about this
-            "CC" => {}, // comment line, we don't care about this
-            "FH" => {}, // feature header line, we don't care about this
-            _ => println!("Unexpected line: {}", line),
-        }
+pub fn parse_taxonomy(first_line: &str, lines: &mut Peekable<Lines<BufReader<File>>>) -> Vec<String>{
+    let mut taxonomy:Vec<String> = Vec::new();
+    let first_fields = first_line.split(';').collect::<Vec<&str>>();
+    assert!(first_line.starts_with("OC"), "Expected OC line for taxonomy, found {}", first_line);
+    let special_case = first_fields[0].trim_start_matches("OC").trim();
+    if special_case.split_whitespace().collect::<Vec<&str>>().len() > 1{
+        taxonomy.push(special_case.replace(" ", "_").to_string());
+    }
+    else{
+       taxonomy.push(special_case.to_string()); 
     }
 
-    // ok, we've processed the data file, now extract what we need from it.
-
+    for field in first_fields[1..].iter(){
+        let new_field= field.trim().replace(" ", "_");
+         taxonomy.push(new_field.trim_end_matches('.').to_string());
+    }
+    let mut next_line = match lines.peek(){
+        Some(Ok(line)) => line.to_string(),
+        _ => panic!("Unexpected end of file")
+    };
+    while next_line.starts_with("OC"){
+        let line = (&mut *lines).next().unwrap().unwrap();
+        let fields = line.split(';').collect::<Vec<&str>>();
+        let special_case = fields[0].trim_start_matches("OC").trim();
+        if special_case.split_whitespace().collect::<Vec<&str>>().len() > 1{
+            taxonomy.push(special_case.replace(" ", "_").to_string());
+        }
+        else{
+            taxonomy.push(special_case.to_string()); 
+        }
+        for field in fields[1..].iter(){
+            let new_field= field.trim().replace(" ", "_");
+            taxonomy.push(new_field.trim_end_matches('.').to_string());
+        }
+        next_line = match lines.peek(){
+            Some(Ok(line)) => line.to_string(),
+            _ => panic!("Unexpected end of file")
+        };
+    }
+    taxonomy
 }
