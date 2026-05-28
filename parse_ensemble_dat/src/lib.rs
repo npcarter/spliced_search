@@ -10,7 +10,7 @@ use std::cmp::{min, max};
 pub struct Exon{
     pub start: i64,
     pub end: i64,
-    complement: bool,
+    pub complement: bool,
 }
 
 // For introns, need to know where they start and end in the contig.
@@ -34,6 +34,7 @@ pub struct Protein{
     // DNA sequence start
     pub dna_sequence: Vec<char>,  //DNA sequence of the protein
     pub protein_sequence: Vec<char>,
+    pub translation_table: i8,
 }
 
 pub struct Gene{
@@ -209,31 +210,34 @@ pub fn parse_contig(contig: &mut Contig){
                     }
                 }
             }
-            let mut translated_sequence = translate_sequence(&check_sequence, protein.codon_start);
-            if translated_sequence.last().unwrap() == &'*' { translated_sequence.pop(); } // handle trailing stop codon
-            let mut found_missmatch = false;
+            if protein.translation_table ==0{ // don't support alternate translations yet, but this is just self-checks
+                let mut translated_sequence = translate_sequence(&check_sequence, protein.codon_start);
+                if translated_sequence.last().unwrap() == &'*' { translated_sequence.pop(); } // handle trailing stop codon
+                let mut found_missmatch = false;
 
-            let mut start_offset = 0;
-            if protein.protein_sequence.len() > translated_sequence.len(){ // see if we need to skip leading 'X' characters in the ENSEMBL sequence
-                while protein.protein_sequence[start_offset] == 'X'{
-                    start_offset += 1;
+                let mut start_offset = 0;
+                if protein.protein_sequence.len() > translated_sequence.len(){ // see if we need to skip leading 'X' characters in the ENSEMBL sequence
+                    while protein.protein_sequence[start_offset] == 'X'{
+                        start_offset += 1;
+                    }
                 }
-            }
-            if translated_sequence.len() + start_offset != protein.protein_sequence.len() {
-                found_missmatch = true;
-            }
-            for i in 1..translated_sequence.len() {
-                if translated_sequence[i] != protein.protein_sequence[i+start_offset] && translated_sequence[i] != 'X' && protein.protein_sequence[i+start_offset] != 'X' && !(translated_sequence[i] == '*' && protein.protein_sequence[i+start_offset] == 'U'){
+            
+                if translated_sequence.len() + start_offset != protein.protein_sequence.len() {
                     found_missmatch = true;
-                    println!("missmatch at position {}: {} vs {}", i, translated_sequence[i], protein.protein_sequence[i]);
                 }
-            }
-            if found_missmatch{
-                println!("Error: protein sequence {} does not match translated sequence {}", protein.protein_sequence.iter().collect::<String>(), translated_sequence.iter().collect::<String>());
-                let first_mismatch = translated_sequence[1..].iter()
-                    .zip(protein.protein_sequence[1..].iter())
-                    .position(|(a, b)| a != b);
-                println!("First mismatch at position {}.", first_mismatch.unwrap())
+                for i in 1..translated_sequence.len() {
+                    if translated_sequence[i] != protein.protein_sequence[i+start_offset] && translated_sequence[i] != 'X' && protein.protein_sequence[i+start_offset] != 'X' && !(translated_sequence[i] == '*' && protein.protein_sequence[i+start_offset] == 'U'){
+                        found_missmatch = true;
+                        println!("missmatch at position {}: {} vs {}", i, translated_sequence[i], protein.protein_sequence[i]);
+                    }
+                }
+                if found_missmatch{
+                    println!("Error: protein sequence {} does not match translated sequence {}", protein.protein_sequence.iter().collect::<String>(), translated_sequence.iter().collect::<String>());
+                    let first_mismatch = translated_sequence[1..].iter()
+                        .zip(protein.protein_sequence[1..].iter())
+                        .position(|(a, b)| a != b);
+                    println!("First mismatch at position {}.", first_mismatch.unwrap())
+                }
             }
         }
     }
@@ -316,7 +320,7 @@ pub fn parse_gene(lines: &mut Peekable<Lines<BufReader<File>>>) -> Gene{
 
 // parse the description of a protein from the dat file
 pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Protein{
-    let mut the_protein = Protein{name: "".to_string(), uniprot_name: "".to_string(), mrna_start: 0, mrna_end: 0, coding_start:0, coding_end:0,
+    let mut the_protein = Protein{name: "".to_string(), uniprot_name: "".to_string(), mrna_start: 0, mrna_end: 0, translation_table: 0, coding_start: 0, coding_end: 0,
         introns: Vec::new(), exons: Vec::new(), codon_start: 0, dna_sequence: Vec::new(), protein_sequence: Vec::new()};
 
     // First, construct the list of exons from the join statement
@@ -383,7 +387,7 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
     // now, see if there are any other lines of exons
     cds_line = (&mut *lines).next().unwrap().unwrap();
     cds_fields = cds_line.split_whitespace().collect::<Vec<&str>>();
-    while !cds_fields[1].starts_with("/gene") && !cds_fields[1].starts_with("/codon"){
+    while !cds_fields[1].starts_with("/"){
         cds_exons = cds_fields[1].trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',').collect::<Vec<&str>>();
         last_cds_exon = parse_exon(cds_exons[cds_exons.len()-1].trim_start_matches('(').trim_end_matches(')'));
         cds_line = (&mut *lines).next().unwrap().unwrap();
@@ -393,6 +397,9 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
         //codons are offset from the first residue in the coding region
         the_protein.codon_start = cds_fields[1].trim_start_matches("/codon_start=\"").trim_end_matches("\"").parse::<i8>().expect("Failed to parse codon_start field") -1;
         // -1 because codon_start of 1 means zero offset from the start of the sequence
+    }
+    else if cds_fields[1].starts_with("/transl_table="){
+        the_protein.translation_table = cds_fields[1].trim_start_matches("/transl_table=").parse::<i8>().expect("Failed to parse transl_table field");
     }
     if !first_cds_exon.complement{
         the_protein.coding_start = first_cds_exon.start - the_protein.mrna_start;

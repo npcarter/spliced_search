@@ -5,10 +5,9 @@
 
 use std::fs::File;
 use std::fs::exists;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
+use std::io::{Write};
 use std::io::{BufRead,BufReader, Lines};
-
+use glob::glob;
 use std::iter::Peekable;
 use clap::Parser;
 
@@ -46,32 +45,80 @@ fn write_contig_training_data(contig: &Contig, base_outdir: &String){
             },
             Ok(true) => {},    
         }
-
-        for gene in contig.genes.iter(){
-            let mut prot_number = 1;
-            for protein in gene.proteins.iter(){
-                let mut protein_outfile = outdir.clone();
-                if !protein_outfile.ends_with("/") {
-                    protein_outfile.push_str("/"); 
-                }
+    }
+    for gene in contig.genes.iter(){
+        let mut prot_number = 1;
+        for protein in gene.proteins.iter(){
+            let mut protein_outfile = outdir.clone();
+            if !protein_outfile.ends_with("/") {
+                protein_outfile.push_str("/"); 
+            }
             if protein.uniprot_name != "" {
                 protein_outfile.push_str(format!("{}_{}_p{}", contig.name,protein.uniprot_name, prot_number).replace(" ", "_").replace(":", "_").to_lowercase().as_str());
             }
             else{
                 protein_outfile.push_str(format!("{}_{}_p{}", contig.name, protein.name, prot_number).replace(" ", "_").to_lowercase().as_str());
             }
-            println!("writing training data for protein {} to file {}", protein.name, protein_outfile);
-            prot_number += 1;
+            let mut boundaries:Vec<char> = vec!['0'; protein.dna_sequence.len()];
+            for exon in protein.exons.iter() {
+                if exon.complement {
+                    let start_index = protein.mrna_end - exon.end;  // complement exons are in reverse order
+                    let end_index = protein.mrna_end - exon.start;
+                    boundaries[start_index as usize] = '1'; // exon start
+                    boundaries[end_index as usize] = '2'; // exon end
+                    if start_index > 0 {
+                        boundaries[(start_index - 1) as usize] = '4'; // intron start
+                    }
+                    if end_index < (protein.dna_sequence.len() as i64 - 1) {
+                        boundaries[(end_index + 1) as usize] = '3'; // intron end
+                    }
+                }
+                else{
+                    let start_index = exon.start - protein.mrna_start;
+                    let end_index = exon.end - protein.mrna_start;
+                    boundaries[start_index as usize] = '1'; // exon start
+                    boundaries[end_index as usize] = '2'; // exon end
+                    if start_index > 0 {
+                        boundaries[(start_index - 1) as usize] = '4'; // intron start
+                    }
+                    if end_index < (protein.dna_sequence.len() as i64 - 1) {
+                        boundaries[(end_index + 1) as usize] = '3'; // intron end
+                    }
+                }   
+
+                
             }
+    
+            let mut outfile =File::create(protein_outfile).expect("Unable to create output file");
+            outfile.write_all(protein.dna_sequence.iter().collect::<String>().as_bytes()).expect("Unable to write protein sequence to file");
+            outfile.write_all("\n".as_bytes()).expect("Unable to write newline to file");
+            outfile.write_all(boundaries.iter().collect::<String>().as_bytes()).expect("Unable to write boundaries to file");   
+            prot_number += 1;
         }
     }
+    
 }
 
 fn main() {
     let args = Cli::parse();
 
-    let file = File::open(args.infile.clone()).expect(format!("Unable to open {}", args.infile).as_str());
+    let mut base_path = args.sourcedir.clone();
+    if !base_path.ends_with("/") {
+        base_path.push_str("/");
+    }
 
+    for entry in glob(format!("{}{}*", base_path, args.infile).as_str()).expect("Failed to read glob pattern") {
+        match entry {
+            Ok(path) => process_ensembl_file(path.to_str().unwrap(), &args),
+            Err(e) => println!("Error processing file: {:?}", e),
+        }
+    }
+
+}
+
+fn process_ensembl_file(filepath: &str, args: &Cli) {
+    println!("Processing file {}", filepath);
+    let file = File::open(filepath).expect(format!("Unable to open file {}", filepath).as_str());
     let reader = BufReader::new(file);
     let mut contig = Contig{dna_sequence: Vec::new(),
         genes: Vec::new(),
