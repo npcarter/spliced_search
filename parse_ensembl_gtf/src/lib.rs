@@ -1,11 +1,17 @@
 /* Shared types and functions for parse_ensembl_gtf */
 
+// Enum that records which strand a gene is on
+#[derive(PartialEq)]
+pub enum Strand{
+    Forward,
+    Reverse,
+    Unknown,
+}
 
 
 pub struct Exon{
-    pub start: i64,
-    pub end: i64,
-    pub complement: bool,
+    pub start: usize,
+    pub end: usize,
 }
 
 // For introns, need to know where they start and end in the contig.
@@ -17,22 +23,40 @@ pub struct Intron{
 
 
 pub struct Protein{
-    pub name: String,
+    pub name: Option<String>,
     pub uniprot_name: String,
-    pub mrna_start: i64, // Start of the mRNA within the contig
-    pub mrna_end: i64, // End of the mRNA within the contig
+    pub mrna_start: usize, // Start of the mRNA within the contig
+    pub mrna_end: usize, // End of the mRNA within the contig
     pub coding_start: i64, //start position of the coding sequence within the mRNA
     pub coding_end: i64, // end position of the coding sequence within the mRNA
     pub introns: Vec<Intron>,
     pub exons: Vec<Exon>,
     pub codon_start: i8, // How many positions (0-2) is the first codon start offset from the
     // DNA sequence start
-    pub dna_sequence: Vec<char>,  //DNA sequence of the protein
-    pub protein_sequence: Vec<char>,
+    pub dna_sequence: Vec<u8>,  //DNA sequence of the protein
     pub translation_table: i8,
 }
 
+impl Default for Protein{
+    fn default() -> Self{
+        Self { name: None, // name == None is how we detect uninitialized proteins
+            uniprot_name: "".to_string(),
+            mrna_start: 0, 
+            mrna_end: 0, 
+            coding_start: 0, 
+            coding_end: 0, 
+            introns: Vec::new(), 
+            exons: Vec::new(), 
+            codon_start: 0, 
+            dna_sequence: Vec::new(), 
+            translation_table: 0 }
+    }
+}
+
 pub struct Gene{
-    pub 
+    pub gene_id: String,
+    pub start: usize,
+    pub end: usize,
+    pub strand: Strand,
     pub proteins: Vec<Protein>,
 }

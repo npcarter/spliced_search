@@ -8,3 +8,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 noodles-gtf = "0.52.0"
 glob = "0.3.3"
 noodles-fasta = "0.61.0"
+noodles-gff = "0.57.0"
+bstr = "1.12.1"
+noodles-core = "0.20.0"
