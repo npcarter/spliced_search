@@ -1,5 +1,5 @@
 /* Shared types and functions for parse_ensembl_gtf */
-
+use serde::Deserialize;
 // Enum that records which strand a gene is on
 #[derive(PartialEq)]
 pub enum Strand{
@@ -8,10 +8,16 @@ pub enum Strand{
     Unknown,
 }
 
-
+#[derive(PartialEq)]
+pub enum CodonPosition{
+    First,
+    Second,
+    Third,
+}
 pub struct Exon{
     pub start: usize,
     pub end: usize,
+    pub start_offset: Option<CodonPosition>,
 }
 
 // For introns, need to know where they start and end in the contig.
@@ -27,8 +33,8 @@ pub struct Protein{
     pub uniprot_name: String,
     pub mrna_start: usize, // Start of the mRNA within the contig
     pub mrna_end: usize, // End of the mRNA within the contig
-    pub coding_start: i64, //start position of the coding sequence within the mRNA
-    pub coding_end: i64, // end position of the coding sequence within the mRNA
+    pub coding_start: usize, //start position of the coding sequence within the mRNA
+    pub coding_end: usize, // end position of the coding sequence within the mRNA
     pub introns: Vec<Intron>,
     pub exons: Vec<Exon>,
     pub codon_start: i8, // How many positions (0-2) is the first codon start offset from the
@@ -59,4 +65,11 @@ pub struct Gene{
     pub end: usize,
     pub strand: Strand,
     pub proteins: Vec<Protein>,
+}
+
+#[derive(Deserialize, Debug)]
+struct EnsemblSequence {
+    seq: String,
+    id: String,
+    molecule: String,
 }

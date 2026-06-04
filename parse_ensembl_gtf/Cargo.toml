@@ -11,3 +11,5 @@ noodles-fasta = "0.61.0"
 noodles-gff = "0.57.0"
 bstr = "1.12.1"
 noodles-core = "0.20.0"
+serde = {version = "1.0.228", features = ["derive"]}
+reqwest = "0.13.4"

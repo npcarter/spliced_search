@@ -334,8 +334,8 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
     let mut next_fields = next_line.split_whitespace().collect::<Vec<&str>>();
     while !(next_fields[0] == "FT" && next_fields[1].starts_with("/gene")){
         let line = (&mut *lines).next().unwrap().unwrap();
-
-        for exon_string in line.split_whitespace().collect::<Vec<&str>>()[1].trim_end_matches(")").trim_end_matches(',').split(',') {
+        
+        for exon_string in line.split_whitespace().skip(1).collect::<Vec<&str>>().join("").trim_end_matches(")").trim_end_matches(',').split(',') {
             the_protein.exons.push(parse_exon(exon_string.trim_start_matches('(').trim_end_matches(')')));
         }
         next_line = match lines.peek(){
@@ -379,8 +379,9 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
     let mut cds_line = (&mut *lines).next().unwrap().unwrap();
     let mut cds_fields = cds_line.split_whitespace().collect::<Vec<&str>>();
     assert!(cds_fields[0] == "FT" && cds_fields[1].starts_with("CDS"), "Misformatted CDS line: {}", cds_line);
-
-    let mut cds_exons = cds_fields[2].trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',').collect::<Vec<&str>>();
+    cds_fields.drain(0..2); // drop the FT and CDS fields
+    let cds_string = cds_fields.join("");
+    let mut cds_exons = cds_string.trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',').collect::<Vec<&str>>();
     let first_cds_exon = parse_exon(cds_exons[0].trim_start_matches('(').trim_end_matches(')'));
     let mut last_cds_exon = parse_exon(cds_exons[cds_exons.len()-1].trim_start_matches('(').trim_end_matches(')'));
 
@@ -388,7 +389,10 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
     cds_line = (&mut *lines).next().unwrap().unwrap();
     cds_fields = cds_line.split_whitespace().collect::<Vec<&str>>();
     while !cds_fields[1].starts_with("/"){
-        cds_exons = cds_fields[1].trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',').collect::<Vec<&str>>();
+        cds_fields.drain(0..1);
+        let cds_string2 = cds_fields.join("");
+        cds_exons = cds_string2.trim_end_matches(")").trim_end_matches(',').split(',').collect();
+   //     cds_fields[1].trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',').collect::<Vec<&str>>();
         last_cds_exon = parse_exon(cds_exons[cds_exons.len()-1].trim_start_matches('(').trim_end_matches(')'));
         cds_line = (&mut *lines).next().unwrap().unwrap();
         cds_fields = cds_line.split_whitespace().collect::<Vec<&str>>();
@@ -438,7 +442,7 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
 }
 
 
-// generate an intron from the string that describes it.
+// generate an exon from the string that describes it.
 pub fn parse_exon(exon_string: &str) -> Exon{
     let start_end:Vec<&str>;
     let complement:bool = exon_string.starts_with("complement");
@@ -447,8 +451,16 @@ pub fn parse_exon(exon_string: &str) -> Exon{
     }
     else{start_end = exon_string.split(|c| c=='(' ||c==')').collect::<Vec<&str>>()[1].split("..").collect::<Vec<&str>>(); }
 
-    let start:i64 = start_end[0].parse::<i64>().unwrap();
-    let end:i64 = start_end[1].parse::<i64>().unwrap();
+    let start:i64 = match start_end[0].parse::<i64>(){
+        Ok(val) => val,
+        Err(e) => {eprintln!("Unparseable value of {} found in exon", start_end[1]);
+        0},
+    };
+    let end:i64 = match start_end[1].parse::<i64>(){
+        Ok(val) => val,
+        Err(e) => {eprintln!("Unparseable value of {} found in exon", start_end[1]);
+        0},
+    };
 
     Exon{start, end, complement}
 }

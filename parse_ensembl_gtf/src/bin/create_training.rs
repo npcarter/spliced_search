@@ -1,16 +1,15 @@
-use std::alloc::handle_alloc_error;
 use std::fs::File;
 use std::fs::exists;
 use std::io::{BufRead,BufReader, Lines};
 use std::result;
 use glob::glob;
-use noodles_fasta::record;
-use std::iter::Peekable;
 use clap::Parser;
 use noodles_gtf as gtf;
 use noodles_fasta as fasta;
 use noodles_gff as gff;
 use noodles_core;
+use reqwest::Error;
+use serde::Deserialize;
 use parse_ensembl_gtf::*;
 use bstr::ByteSlice;
 
@@ -97,6 +96,7 @@ fn main() {
             if in_protein_coding{ // We just finished reading the records for a protein coding gene
                         // so process it
                 let the_gene = parse_gtf_gene(&gene_gtf_records, &current_fasta_record);
+                write_gene_traindata(the_gene);
             }
             gene_gtf_records = Vec::new(); // clear this, since we're starting a new gene.
             let attrib = the_recbuf.attributes();
@@ -122,7 +122,7 @@ fn main() {
             // so start building the vector of records that represent the gene
                 
             // First, though, make sure we have the FASTA record that goes with the source of this gene
-            while(current_fasta_record.name() != the_recbuf.reference_sequence_name()) {
+            while current_fasta_record.name() != the_recbuf.reference_sequence_name() {
                 fasta_result = fasta_reader.records().next();
                 match fasta_result {
                     Some(record) => {
@@ -156,8 +156,10 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
     let mut the_protein = Protein::default();
 
     for record in gtf_records {
-        match record.ty().to_str() {
-            Ok("gene")  => {
+        match record.ty().to_str() { // what type of record is this
+            Ok("gene")  => { // start of new gene, create the record
+                assert!(the_gene.gene_id == ""); // There should only be one gene record in a gene.
+
                 let attrib = record.attributes();
                 match attrib.get(b"gene_id") {
                     None => {
@@ -186,8 +188,9 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                         assert!(the_gene.strand != Strand::Forward); // Complain if gene seems to switch strands
                         the_gene.strand = Strand::Reverse;
                     }
-                }
+                } 
             }
+            
             Ok("transcript") => {
             // start of new protein, so push old one onto gene list if there is one.
                 if the_protein.name != None{ // There was a previous protein.  Push it onto the gene's list and create a new one
@@ -197,6 +200,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                 // Grab what information we can from this record
                 the_protein.mrna_start = record.start().get() ;
                 the_protein.mrna_end = record.end().get();
+
                 let start = noodles_core::Position::try_from(the_protein.mrna_start).expect("Couldn't generate Position from mrna_start");
                 let end = noodles_core::Position::try_from(the_protein.mrna_end).expect("Couldn't generate position from mrna_end");
 
@@ -212,7 +216,8 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                     }
                     Strand::Reverse => {
                         the_protein.dna_sequence = Vec::new(); // make sure this starts empty
-                        for residue in fasta_record.sequence().slice(start..=end).expect("Couldn't extract DNA sequence from reverse strand transcript").complement(){
+                        // complement function appears to complement residues, but not reverse order.
+                        for residue in fasta_record.sequence().slice(start..=end).expect("Couldn't extract DNA sequence from reverse strand transcript").complement().rev(){
                             match residue{
                                 Err(e) => {
                                     eprintln!("Error encountered complementing DNA sequence: {}", e);
@@ -224,7 +229,9 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                     }
                 }
             }
-            Ok("exon") => {
+            
+            Ok("exon") => {  // parse the record and add an exon to the protein's list
+
                 assert!(record.start().get() <= record.end().get()); // check to make sure our expectations about start and end are preserved
                 // convert from 1-indexed positions within the FASTA record 
                 // to 0-indexed offsets within the transcript
@@ -256,19 +263,150 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                 let the_exon = Exon{
                     start: start,
                     end: end,
+                    start_offset: None,
                 };
                 the_protein.exons.push(the_exon);
             }
+            
+            Ok("CDS") => { // coding segment.  
+                // If this is the first coding segment, we need to extract the
+                // name of the protein and the start position of the start codon
+                if the_protein.name == None{  // This is the first coding segment of the protein
+                    
+                    // compute the offset from the start of the first codon to the first
+                    // nucleotide in the start codon, accounting for reverse-strand effects
+                    let start_codon_start = match the_gene.strand{
+                        Strand::Forward => {
+                            assert!(record.start().get() >= the_protein.mrna_start);  // codon start shouldn't be before mrna start
+                            record.start().get() - the_protein.mrna_start
+                        }
+                        Strand::Reverse => {
+                            assert!(record.end().get() <= the_protein.mrna_end); // codon start shouldn't be after mrna end 
+                            // on reverse strand
+                            the_protein.mrna_end - record.end().get()
+                        }
+                        Strand::Unknown => {
+                            panic!("Reached impossible branch in computing start codon offset");
+                        }
+                    };
+                    the_protein.coding_start = start_codon_start;
 
+                    // retrieve the protein name from the CDS record
+                    let attrib = record.attributes();
+                    match attrib.get(b"protein_id") {
+                        None => {
+                            eprintln!("Protein_id attribute wasn't found in CDS record");
+                            the_protein.name = Some("NONE".to_string());
+                        }
+                        Some(val) => {
+                            the_protein.name = Some(val.as_string().expect("GTF protein_id attribute wasn't a string").to_string());
+                        }
+                    }
+                }
+                match record.phase(){
+                    Some(val) => {
+                        assert!(the_protein.exons.len() >0); //We should have at least one exon by the time we hit a CDS entry 
+                        let last_exon_index = the_protein.exons.len() -1;
+                        match val {
+                            noodles_gff::feature::record::Phase::Zero => {the_protein.exons[last_exon_index].start_offset = Some(CodonPosition::First);}
+                            noodles_gff::feature::record::Phase::One => {the_protein.exons[last_exon_index].start_offset = Some(CodonPosition::Second);} 
+                            noodles_gff::feature::record::Phase::Two => {the_protein.exons[last_exon_index].start_offset = Some(CodonPosition::Third);}
+                        }
+                    }
+                    None => {
+                        panic!("CDS entry found without phase");
+                    }
+                }
+                
+                // update the protein's coding_end value if necessary 
+                let coding_end = match the_gene.strand{
+                    Strand::Forward => {
+                        assert!(record.end().get() >= the_protein.mrna_start);  // codon start shouldn't be before mrna start
+                        std::cmp::max(record.end().get() - the_protein.mrna_start, the_protein.coding_end)
+                    }
+                    Strand::Reverse => {
+                        assert!(record.start().get() <= the_protein.mrna_end); // codon start shouldn't be after mrna end 
+                        // on reverse strand
+                        std::cmp::max(the_protein.mrna_end - record.start().get(), the_protein.coding_end)
+                    }
+                    Strand::Unknown => {
+                        panic!("Reached impossible branch in computing start codon offset");
+                    }
+                };
+                the_protein.coding_end = coding_end;
+            }
+
+            Ok("start_codon") => {  // If the protein has one of these entries, check that 
+                // it matches what we computed
+                let start_codon_start = match the_gene.strand{
+                    Strand::Forward => {
+                        assert!(record.start().get() >= the_protein.mrna_start);  // codon start shouldn't be before mrna start
+                        record.start().get() - the_protein.mrna_start
+                    }
+                    Strand::Reverse => {
+                        assert!(record.end().get() <= the_protein.mrna_end); // codon start shouldn't be after mrna end 
+                        // on reverse strand
+                        the_protein.mrna_end - record.end().get()
+                    }
+                    Strand::Unknown => {
+                        panic!("Reached impossible branch in computing start codon offset");
+                    }
+                };
+                if record.end().get() - record.start().get() == 2{ // this is a well-formed start_codon entry, so check it
+                    assert!(start_codon_start == the_protein.coding_start);
+                }
+            //    else{
+              //      println!("miss-formed start_codon entry found for protein {:?}", the_protein.name);
+               // }
+            }
+
+            Ok("stop_codon") => {
+                let stop_codon_start = match the_gene.strand{
+                    Strand::Forward => {
+                        assert!(record.start().get() <= the_protein.mrna_end);  // codon start shouldn't be after mrna_end
+                        record.start().get() - the_protein.mrna_start
+                    }
+                    Strand::Reverse => {
+                        assert!(record.end().get() >= the_protein.mrna_start); // codon start shouldn't be before mrna_end 
+                        // on reverse strand
+                        the_protein.mrna_end - record.end().get()
+                    }
+                    Strand::Unknown => {
+                        panic!("Reached impossible branch in computing start codon offset");
+                    }
+                };
+                if record.end().get() - record.start().get()==2{ // This is a well-formed stop codon entry, so use it
+                    if the_protein.coding_end > stop_codon_start{
+                        println!("beep");
+                    }
+                    assert!(the_protein.coding_end <= stop_codon_start);
+                }
+            }
+            Ok("Selenocysteine") => {
+                // special entry that records the presence of a selenocystine.  We don't care about that, so do nothing.
+            }
             Err(e)=> {
                 eprintln!("Unable to parse record type as string: {}", e);
                 std::process::exit(1);
             }
+
             Ok(val) => {
                 eprintln!("Unexpected record type field found: {}", val);
                 std::process::exit(1);
             } 
         }
     }
-    return the_gene;
+    assert!(the_protein.name != None);  // shouldn't have an empty protein at this point
+    the_gene.proteins.push(the_protein);
+
+    the_gene
+}
+
+fn write_gene_traindata(the_gene: Gene){
+    println!("Scanning gene {}", the_gene.gene_id);
+    for protein in the_gene.proteins{
+        println!("Protein {:?} had coding_start {} and coding_end {}", protein.name, protein.coding_start, protein.coding_end);
+        println!("Start codon looks like {}{}{}", protein.dna_sequence[protein.coding_start] as char, protein.dna_sequence[protein.coding_start+1] as char, protein.dna_sequence[protein.coding_start+2] as char);
+        println!("");
+    }
 }
