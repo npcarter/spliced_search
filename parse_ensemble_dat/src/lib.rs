@@ -5,6 +5,7 @@ use std::fs::File;
 use std::iter::Peekable;
 use std::io::{BufReader, Lines};
 use std::cmp::{min, max};
+use rand::{RngExt};
 // For exons, need to know where they start and end in the contig,
 // plus whether they are complementary to the DNA sequence.
 pub struct Exon{
@@ -31,7 +32,10 @@ pub struct Protein{
     pub introns: Vec<Intron>,
     pub exons: Vec<Exon>,
     pub codon_start: i8, // How many positions (0-2) is the first codon start offset from the
-    // DNA sequence start
+    // coding sequence start
+    // use these because we want to pad the start and end of the transcript for learning.
+    pub dna_start: i64, // start position of the DNA sequence within the contig
+    pub dna_end: i64, // end position of the DNA sequence within the contig
     pub dna_sequence: Vec<char>,  //DNA sequence of the protein
     pub protein_sequence: Vec<char>,
     pub translation_table: i8,
@@ -177,11 +181,21 @@ pub fn translate_sequence(mrna_sequence: &Vec<char>, codon_start: i8) -> Vec<cha
 // the protein sequences for each gene.  This function handles that.
 pub fn parse_contig(contig: &mut Contig){
   //  println!("Contig {} has length {} and organism {}", contig.name, contig.length, contig.organism);
+    let mut rng = rand::rng(); // 
     for gene in contig.genes.iter_mut() {
         for protein in gene.proteins.iter_mut() {
             let mut check_sequence: Vec<char> = Vec::new();
+            // pad the start and end of the transcript to a random length between 100 and 10% of the transcript length
+            let pad_max_length = max((protein.mrna_end - protein.mrna_start + 1) /10, 100);
+            // don't pad more than the start or end of the transcript
+            let padding_start = min(rng.random_range(100..pad_max_length), protein.mrna_start - 1);
+            let padding_end = min(rng.random_range(100..pad_max_length), contig.dna_sequence.len() as i64 - protein.mrna_end - 1);
+            protein.dna_start = protein.mrna_start - padding_start;
+            protein.dna_end = protein.mrna_end + padding_end;
+            protein.coding_start += padding_start; // adjust the location of the coding region to account for the padding
+            protein.coding_end += padding_start;
             if !protein.exons[0].complement {
-                for index in protein.mrna_start..protein.mrna_end + 1
+                for index in protein.dna_start..protein.dna_end + 1
                 { protein.dna_sequence.push(contig.dna_sequence[index as usize - 1]); }
 
                 /*     //need to handle first exon separately because coding sequence may not start at start of exon
@@ -190,21 +204,25 @@ pub fn parse_contig(contig: &mut Contig){
                      }
      */
                 for exon in protein.exons.iter_mut() {
-                    for index in max(protein.coding_start + protein.mrna_start, exon.start)..(min(exon.end, protein.coding_end + protein.mrna_start) + 1) {
-                        check_sequence.push(protein.dna_sequence[(index - protein.mrna_start) as usize]);
+                    exon.start += padding_start; // account for the padding at the beginning of the dna sequence we copied
+                    exon.end += padding_start;
+                    for index in max(protein.coding_start + protein.dna_start, exon.start)..(min(exon.end, protein.coding_end + protein.dna_start) + 1) {
+                        check_sequence.push(protein.dna_sequence[(index - protein.dna_start) as usize]);
                     }
                     //println!("{}, {}, length={}", exon.start-protein.mrna_start, min(exon.end, protein.coding_end+protein.mrna_start)-protein.mrna_start, check_sequence.len());
                 }
             } else {
-                for index in (protein.mrna_start..protein.mrna_end + 1).rev()
+                for index in (protein.dna_start..protein.dna_end + 1).rev()
                 {
                     protein.dna_sequence.push(complement(contig.dna_sequence[index as usize - 1]));
                 }
                 //println!("{}: ", protein.name);
                 for exon in protein.exons.iter_mut() {
+                    exon.start += padding_start; // account for the padding at the beginning of the dna sequence we copied
+                    exon.end += padding_start;
                     //println!("start: {}, end: {}", max(protein.coding_start + protein.mrna_start,exon.start), min(exon.end, protein.coding_end+ protein.mrna_start));
-                    for index in (max(protein.coding_start + protein.mrna_start, exon.start)..(min(exon.end, protein.coding_end + protein.mrna_start) + 1)).rev() {
-                        check_sequence.push(protein.dna_sequence[(protein.mrna_end- index)as usize]);
+                    for index in (max(protein.coding_start + protein.dna_start, exon.start)..(min(exon.end, protein.coding_end + protein.dna_start) + 1)).rev() {
+                        check_sequence.push(protein.dna_sequence[(index - protein.dna_start) as usize]);
                        //print!("{} ", protein.mrna_end - index);
                        //println!("{} {}",(protein.mrna_end - index),protein.dna_sequence[(protein.mrna_end- index)as usize]);
                     }
@@ -321,7 +339,7 @@ pub fn parse_gene(lines: &mut Peekable<Lines<BufReader<File>>>) -> Gene{
 // parse the description of a protein from the dat file
 pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<File>>>) -> Protein{
     let mut the_protein = Protein{name: "".to_string(), uniprot_name: "".to_string(), mrna_start: 0, mrna_end: 0, translation_table: 0, coding_start: 0, coding_end: 0,
-        introns: Vec::new(), exons: Vec::new(), codon_start: 0, dna_sequence: Vec::new(), protein_sequence: Vec::new()};
+        introns: Vec::new(), exons: Vec::new(), codon_start: 0, dna_start: 0, dna_end: 0, dna_sequence: Vec::new(), protein_sequence: Vec::new()};
 
     // First, construct the list of exons from the join statement
     for exon_string in fields[2].trim_start_matches("join(").trim_end_matches(")").trim_end_matches(',').split(',') {
@@ -453,12 +471,12 @@ pub fn parse_exon(exon_string: &str) -> Exon{
 
     let start:i64 = match start_end[0].parse::<i64>(){
         Ok(val) => val,
-        Err(e) => {eprintln!("Unparseable value of {} found in exon", start_end[1]);
+        Err(e) => {eprintln!("Unparseable value of {} found in exon, error was {}", start_end[1], e);
         0},
     };
     let end:i64 = match start_end[1].parse::<i64>(){
         Ok(val) => val,
-        Err(e) => {eprintln!("Unparseable value of {} found in exon", start_end[1]);
+        Err(e) => {eprintln!("Unparseable value of {} found in exon, error was {}", start_end[1], e);
         0},
     };
 
