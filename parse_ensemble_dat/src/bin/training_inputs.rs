@@ -10,8 +10,30 @@ use std::io::{BufRead,BufReader, Lines};
 use glob::glob;
 use std::iter::Peekable;
 use clap::Parser;
+use std::cmp::{min, max};
 
 use parse_ensemble_dat::*;
+
+// define constants for the HMM states
+const ILLEGAL_STATE: char = 'Z';
+const INTERGENIC: char='0';
+const START: char = '1';
+const STOP: char = '2';
+const INTRON0: char = '3';
+const INTRON1: char = '4';
+const INTRON2: char = '5';
+const EXON0: char = '6';
+const EXON1: char = '7';
+const EXON2: char = '8';
+const ASS0: char = '9';
+const ASS1: char = 'A';
+const ASS2: char = 'B';
+const DSS0: char = 'C';
+const DSS1: char = 'D';
+const DSS2: char = 'E';
+
+
+
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -59,45 +81,52 @@ fn write_contig_training_data(contig: &Contig, base_outdir: &String){
             else{
                 protein_outfile.push_str(format!("{}_{}_p{}", contig.name, protein.name, prot_number).replace(" ", "_").to_lowercase().as_str());
             }
-            let mut boundaries:Vec<char> = vec!['0'; protein.dna_sequence.len()];
-            for exon in protein.exons.iter() {
-                if exon.complement {
-                    let start_index = protein.mrna_end - exon.end;  // complement exons are in reverse order
-                    let end_index = protein.mrna_end - exon.start;
-                    boundaries[start_index as usize] = '1'; // exon start
-                    boundaries[end_index as usize] = '2'; // exon end
-                    if start_index > 0 {
-                        boundaries[(start_index - 1) as usize] = '4'; // intron start
-                    }
-                    if end_index < (protein.dna_sequence.len() as i64 - 1) {
-                        boundaries[(end_index + 1) as usize] = '3'; // intron end
-                    }
+            // build the set of hmm states we want to train the NN to model and the HMM to output
+            // remember here that the dna sequence is always ordered from 5' to 3' regardless of source strand
+            let mut hmm_states:Vec<char> = vec![ILLEGAL_STATE; protein.dna_sequence.len()];
+            let start_codon_start : usize = match protein.exons[0].complement{
+                true => {max(protein.coding_start, protein.exons[0].end) as usize}
+                false => {max(protein.coding_start, protein.exons[0].start) as usize}
+            };
+            let subset: &[char] = &protein.dna_sequence[(max(10, start_codon_start) - 10.. min(start_codon_start +10, protein.dna_sequence.len()-1))];
+            let substring: String = subset.iter().collect();
+            let start_setby = match start_codon_start == protein.coding_start as usize{
+                true => {"coding_start"},
+                false => {"exon"},
+            };
+ 
+            // First: label the start and stop codons
+            assert!(start_codon_start < (protein.coding_end -2) as usize);
+            hmm_states[start_codon_start+2]= START;
+            if protein.dna_sequence[start_codon_start] == 'G' || 
+            protein.dna_sequence[start_codon_start +1] != 'T' ||
+            protein.dna_sequence[start_codon_start +2] != 'G'{
+                println!("{} {}", protein.name, substring);
+                eprintln!("Protein {} had unusual start codon of {}{}{}, complement was {}, first AA was {}", protein.name, protein.dna_sequence[start_codon_start],
+                protein.dna_sequence[start_codon_start +1],protein.dna_sequence[start_codon_start+2], protein.exons[0].complement, protein.protein_sequence[0] );
+            }
+/*        else{
+
+                eprintln!("Protein {} had start codon in expected position, complement was {}, start_setby = {}", protein.name, protein.exons[0].complement, start_setby);
+            } */
+            //everything before the start codon is intergenic
+            for i in 0..start_codon_start +2{
+                hmm_states[i as usize] = INTERGENIC;
                 }
-                else{
-                    let start_index = exon.start - protein.mrna_start;
-                    let end_index = exon.end - protein.mrna_start;
-                    boundaries[start_index as usize] = '1'; // exon start
-                    boundaries[end_index as usize] = '2'; // exon end
-                    if start_index > 0 {
-                        boundaries[(start_index - 1) as usize] = '4'; // intron start
-                    }
-                    if end_index < (protein.dna_sequence.len() as i64 - 1) {
-                        boundaries[(end_index + 1) as usize] = '3'; // intron end
-                    }
-                }   
+
 
                 
-            }
     
             let mut outfile =File::create(protein_outfile).expect("Unable to create output file");
             outfile.write_all(protein.dna_sequence.iter().collect::<String>().as_bytes()).expect("Unable to write protein sequence to file");
             outfile.write_all("\n".as_bytes()).expect("Unable to write newline to file");
-            outfile.write_all(boundaries.iter().collect::<String>().as_bytes()).expect("Unable to write boundaries to file");   
+            outfile.write_all(hmm_states.iter().collect::<String>().as_bytes()).expect("Unable to write boundaries to file");   
             prot_number += 1;
         }
     }
-    
 }
+    
+
 
 fn main() {
     let args = Cli::parse();
@@ -132,13 +161,10 @@ fn process_ensembl_file(filepath: &str, args: &Cli) {
         let fields = line.split_whitespace().collect::<Vec<&str>>();
         match fields[0] {
             "ID" => {
-                if contig.name != "" {
-                    parse_contig(&mut contig);
-                    write_contig_training_data(&contig, &args.outdir);
-                }
-                contig = Contig { dna_sequence: Vec::new(), genes: Vec::new(), length: 0, organism: "".to_string(), taxonomy: Vec::new(), name: "".to_string() };
+                assert!(contig.name == ""); // make sure we've processed any previous contig
                 contig.name = fields[1].to_string();
                 contig.length = fields[5].parse::<i64>().unwrap();
+                println!("Starting to process contig {}", contig.name);
                 //           println!("contig length is {}", contig.length);
             },
             "OS" => {
@@ -167,6 +193,13 @@ fn process_ensembl_file(filepath: &str, args: &Cli) {
             "//" => {
                 parse_contig(&mut contig);
                 write_contig_training_data(&contig, &args.outdir);
+                println!("Finished processing contig {}", contig.name);
+                contig = Contig{dna_sequence: Vec::new(),
+                    genes: Vec::new(),
+                    length: 0,
+                    organism: "".to_string(),
+                    taxonomy: Vec::new(),
+                    name: "".to_string()};
             },
             "XX" => {}, // spacer line
             "AC" => {}, // accession line, we don't care about this
@@ -180,6 +213,6 @@ fn process_ensembl_file(filepath: &str, args: &Cli) {
         }
     }
 
-    // ok, we've processed the data file, now extract what we need from it.
+   assert!(contig.name == ""); // make sure we've processed all the contigs
 
 }

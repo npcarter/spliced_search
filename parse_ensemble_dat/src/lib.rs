@@ -6,8 +6,10 @@ use std::iter::Peekable;
 use std::io::{BufReader, Lines};
 use std::cmp::{min, max};
 use rand::{RngExt};
-// For exons, need to know where they start and end in the contig,
+// For exons, need to know where they start and end,
 // plus whether they are complementary to the DNA sequence.
+// start/end are initially absolute positions within the contig, 
+// but get converted to offsets within the DNA region of the protein
 pub struct Exon{
     pub start: i64,
     pub end: i64,
@@ -15,7 +17,6 @@ pub struct Exon{
 }
 
 // For introns, need to know where they start and end in the contig.
-// and whether they are complementary to the DNA sequence.
 pub struct Intron{
     pub start: i64,
     pub end: i64,
@@ -161,12 +162,31 @@ pub fn translate_codon(codon: &Vec<char>) -> char{
     amino_acid
 }
 
+// check whether a codon matches one of the possible start codons
+pub fn start_codon(codon: &Vec<char>) -> bool{
+    if codon.len() != 3 { panic!("Codon must be three characters long"); }
+    let codon_string = codon.iter().collect::<String>();
+    match codon_string.as_str(){
+        "ATG" => true,
+        "TTG" => true,
+        "CTG" => true,
+        _ => false,
+    }
+}
+
 // translate a DNA sequence into a protein sequence
 pub fn translate_sequence(mrna_sequence: &Vec<char>, codon_start: i8) -> Vec<char>{
     let mut protein_sequence:Vec<char> = Vec::new();
     let dna_sequence = mrna_sequence[codon_start as usize ..].to_vec();
    // if dna_sequence.len() % 3 != 0 { panic!("DNA sequence must be a multiple of three characters long"); }
-    for i in 0..(dna_sequence.len()/3){
+   // special-case the start codon
+   if start_codon(&dna_sequence[0..3].to_vec()){
+    protein_sequence.push('M');
+   }
+   else{
+    protein_sequence.push(translate_codon(&dna_sequence[0..3].to_vec()));
+   }
+    for i in 1..(dna_sequence.len()/3){
         protein_sequence.push(translate_codon(&dna_sequence[i*3..(i*3)+3].to_vec()));
     }
 
@@ -186,15 +206,19 @@ pub fn parse_contig(contig: &mut Contig){
         for protein in gene.proteins.iter_mut() {
             let mut check_sequence: Vec<char> = Vec::new();
             // pad the start and end of the transcript to a random length between 100 and 10% of the transcript length
-            let pad_max_length = max((protein.mrna_end - protein.mrna_start + 1) /10, 100);
+            let pad_max_length = max((protein.mrna_end - protein.mrna_start + 1) /10, 101);
             // don't pad more than the start or end of the transcript
-            let padding_start = min(rng.random_range(100..pad_max_length), protein.mrna_start - 1);
-            let padding_end = min(rng.random_range(100..pad_max_length), contig.dna_sequence.len() as i64 - protein.mrna_end - 1);
+            // subtract one from mrna_start because the positions are 1-indexed and we don't want to get a dna_start = 0
+            // if the mrna_start is near the beginning of the contig
+            let padding_start = min(rng.random_range(100..pad_max_length), protein.mrna_start-1);
+
+            // don't subtract one here because we want to pad the mrna by zero positions if it ends at the end of the contig
+            let padding_end = min(rng.random_range(100..pad_max_length), contig.dna_sequence.len() as i64 - protein.mrna_end);
             protein.dna_start = protein.mrna_start - padding_start;
             protein.dna_end = protein.mrna_end + padding_end;
-            protein.coding_start += padding_start; // adjust the location of the coding region to account for the padding
-            protein.coding_end += padding_start;
-            if !protein.exons[0].complement {
+            if !protein.exons[0].complement {  // forward strand sequence
+                protein.coding_start += padding_start; // adjust the location of the coding region to account for the padding
+                protein.coding_end += padding_start;
                 for index in protein.dna_start..protein.dna_end + 1
                 { protein.dna_sequence.push(contig.dna_sequence[index as usize - 1]); }
 
@@ -204,25 +228,38 @@ pub fn parse_contig(contig: &mut Contig){
                      }
      */
                 for exon in protein.exons.iter_mut() {
-                    exon.start += padding_start; // account for the padding at the beginning of the dna sequence we copied
-                    exon.end += padding_start;
-                    for index in max(protein.coding_start + protein.dna_start, exon.start)..(min(exon.end, protein.coding_end + protein.dna_start) + 1) {
-                        check_sequence.push(protein.dna_sequence[(index - protein.dna_start) as usize]);
+                    assert!(exon.start >= protein.dna_start); // sanity-check the exon start/end positions
+                    assert!(exon.end >= protein.dna_start);
+                    exon.start -= protein.dna_start; // Convert from index within contig to offset within the protein's DNA region
+                    exon.end -= protein.dna_start;
+                    for index in max(protein.coding_start,exon.start)..(min(exon.end, protein.coding_end) + 1) {
+                        check_sequence.push(protein.dna_sequence[index as usize]);
                     }
                     //println!("{}, {}, length={}", exon.start-protein.mrna_start, min(exon.end, protein.coding_end+protein.mrna_start)-protein.mrna_start, check_sequence.len());
                 }
-            } else {
+            } else { //reverse strand sequence
+                //compute the offsets to the coding start and end from the end of the sequence to handle reversing, then swap them 
+                //because the end of the unreversed seqence is the start of the reversed and vice-versa
+                let reverse_end_offset = (protein.dna_end - protein.mrna_start) - protein.coding_start;  // offset in reversed protein = DNA length - offset from beginning
+                let reverse_start_offset = (protein.dna_end - protein.mrna_start) - protein.coding_end;
+                protein.coding_start = reverse_start_offset;
+                protein.coding_end = reverse_end_offset;
                 for index in (protein.dna_start..protein.dna_end + 1).rev()
                 {
                     protein.dna_sequence.push(complement(contig.dna_sequence[index as usize - 1]));
                 }
                 //println!("{}: ", protein.name);
                 for exon in protein.exons.iter_mut() {
-                    exon.start += padding_start; // account for the padding at the beginning of the dna sequence we copied
-                    exon.end += padding_start;
-                    //println!("start: {}, end: {}", max(protein.coding_start + protein.mrna_start,exon.start), min(exon.end, protein.coding_end+ protein.mrna_start));
-                    for index in (max(protein.coding_start + protein.dna_start, exon.start)..(min(exon.end, protein.coding_end + protein.dna_start) + 1)).rev() {
-                        check_sequence.push(protein.dna_sequence[(index - protein.dna_start) as usize]);
+                    assert!(exon.start <= protein.dna_end); // sanity-check the exon start/end positions
+                    assert!(exon.end <= protein.dna_end);
+                    exon.start = protein.dna_end - exon.start; // Convert from index within contig to offset within the protein's DNA region
+                    exon.end = protein.dna_end - exon.end; // accounting for the fact that we reverse direction of the strand
+ //                   println!("start: {}, end: {}", max(exon.end, protein.dna_end - (protein.coding_end +protein.dna_start)), min(protein.dna_end - (protein.coding_start+protein.dna_start), exon.start)+1);
+
+                    // need to convert coding_start, coding_end back into absolute indices within transcript to get delta from protein.dna_end
+                    for index in max(exon.end, protein.coding_start)..min(protein.coding_end, exon.start)+ 1 {
+                        // We've already reversed the protein sequence, so exon.end (as an offset into protein.dna_sequence) will be less than exon.start
+                        check_sequence.push(protein.dna_sequence[(index) as usize]);
                        //print!("{} ", protein.mrna_end - index);
                        //println!("{} {}",(protein.mrna_end - index),protein.dna_sequence[(protein.mrna_end- index)as usize]);
                     }
@@ -243,18 +280,29 @@ pub fn parse_contig(contig: &mut Contig){
                 if translated_sequence.len() + start_offset != protein.protein_sequence.len() {
                     found_missmatch = true;
                 }
-                for i in 1..translated_sequence.len() {
+                for i in 0..translated_sequence.len() {
                     if translated_sequence[i] != protein.protein_sequence[i+start_offset] && translated_sequence[i] != 'X' && protein.protein_sequence[i+start_offset] != 'X' && !(translated_sequence[i] == '*' && protein.protein_sequence[i+start_offset] == 'U'){
                         found_missmatch = true;
                         println!("missmatch at position {}: {} vs {}", i, translated_sequence[i], protein.protein_sequence[i]);
+                        if i == 0{
+                            println!("possible non-canonical start codon of {}{}{}", check_sequence[0], check_sequence[1], check_sequence[2]);
+                        }
                     }
                 }
                 if found_missmatch{
-                    println!("Error: protein sequence {} does not match translated sequence {}", protein.protein_sequence.iter().collect::<String>(), translated_sequence.iter().collect::<String>());
+                    println!("Error: protein {} sequence {} does not match translated sequence {}", protein.name, protein.protein_sequence.iter().collect::<String>(), translated_sequence.iter().collect::<String>());
                     let first_mismatch = translated_sequence[1..].iter()
                         .zip(protein.protein_sequence[1..].iter())
                         .position(|(a, b)| a != b);
-                    println!("First mismatch at position {}.", first_mismatch.unwrap())
+                    if first_mismatch != None{
+                        println!("First mismatch at position {}.", first_mismatch.unwrap());
+                    }
+                    else if protein.protein_sequence.len() > translated_sequence.len(){
+                        println!("Original sequence was longer than translated sequence, {} vs {}", protein.protein_sequence.len(), translated_sequence.len());
+                    }
+                    else{
+                        println!("unknown error in checking sequence translation");
+                    }
                 }
             }
         }
@@ -352,7 +400,8 @@ pub fn parse_protein(fields: Vec<&str>, lines: &mut Peekable<Lines<BufReader<Fil
     let mut next_fields = next_line.split_whitespace().collect::<Vec<&str>>();
     while !(next_fields[0] == "FT" && next_fields[1].starts_with("/gene")){
         let line = (&mut *lines).next().unwrap().unwrap();
-        
+        // Exon start/end positions start out as absolute indices within the contig.  Later, we'll transform them into offsets within the region of DNA
+        // that contains the protein.  We do this as a two-step process to handle the padding that we add to the start/end of the DNA later.
         for exon_string in line.split_whitespace().skip(1).collect::<Vec<&str>>().join("").trim_end_matches(")").trim_end_matches(',').split(',') {
             the_protein.exons.push(parse_exon(exon_string.trim_start_matches('(').trim_end_matches(')')));
         }
