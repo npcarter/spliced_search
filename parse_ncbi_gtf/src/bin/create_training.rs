@@ -1,76 +1,172 @@
 use std::fs::File;
-use std::fs::exists;
-use std::io::{BufRead,BufReader, Lines};
-use std::result;
-use glob::glob;
+use std::io::{BufReader};
 use clap::Parser;
 use noodles_gtf as gtf;
 use noodles_fasta as fasta;
 use noodles_gff as gff;
 use noodles_core;
-use reqwest::Error;
-use serde::Deserialize;
-use parse_ensembl_gtf::*;
-use bstr::ByteSlice;
+use parse_ncbi_gtf::*;
+use bstr::{ByteSlice};
+use std::collections::HashMap;
+use std::str;
+
 
 // Configure command-line arguments
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
-    gtffile: String,
-    fastafile: String,
+    basename: String,
 }
 
 
 fn main() {
     let args = Cli::parse();
-    let gtffile = args.gtffile;
-    let fastafile = args.fastafile;
+    let protein_file:String;
+    let mrna_file:String;
+    let genome_file:String;
+    let gtf_file: String;
 
+    if args.basename.ends_with('/'){
+        protein_file = args.basename.clone() + "protein.faa"; 
+        mrna_file = args.basename.clone() + "rna.fna";
+        genome_file = args.basename.clone() + "genomic.fna";
+        gtf_file = args.basename.clone() + "genomic.gtf";
+    }
+    else{
+        protein_file = args.basename.clone() + "/protein.faa"; 
+        mrna_file = args.basename.clone() + "/rna.fna";
+        genome_file = args.basename.clone() + "/genomic.fna";
+        gtf_file = args.basename.clone() + "/genomic.gtf";
+    }    
+
+
+    // Three HashMaps we'll use to hold the protein, mrna, and raw sequence data from the various files NCBI provides
+    let mut ncbi_mrnas:  HashMap<String, NcbiSequence> = HashMap::new();
+    let mut ncbi_proteins: HashMap<String, NcbiSequence> = HashMap::new();
+    let mut ncbi_genomes: HashMap<String, noodles_fasta::Record> = HashMap::new();
+    // because the mrna and protein entries aren't in the same order, we have to go through 
+    // both files and create a hashmap
+    
+ 
+     // First, read through the mrna file and create ncbi_sequence entries for all the mRNAs in it
+    let file = File::open(mrna_file.clone());
+    let mut mrna_reader : fasta::io::Reader<BufReader<File>>;
+    match file {
+        Ok(file) => {
+            mrna_reader = fasta::io::Reader::new(BufReader::new(file));
+        }
+    
+        Err(e) => {
+            eprintln!("Error opening mrna file {} : {}", mrna_file, e);
+            std::process::exit(1);
+        }
+    }
+    for result in mrna_reader.records(){
+        let mut the_entry = NcbiSequence::default();
+        let record = result.expect("Error reading record from mrna file");
+
+        let mrna_name: String = match str::from_utf8(record.name()){
+            Ok(val) => {
+                val.to_string()
+            },
+            Err (e) => {
+                panic!("Couldn't convert mrna name to String, error was {}", e);
+            }
+        };
+
+        the_entry.id = mrna_name.to_string();
+        the_entry.mrna_sequence = str::from_utf8(record.sequence().as_ref()).expect("Invalid UTF-8 sequence in protein").chars().collect();
+        if ncbi_mrnas.insert(mrna_name.to_string(), the_entry) != None{
+            eprintln!("Duplicate mRNA key {} found", mrna_name);
+        }
+ 
+    }
+    println!("{} coding mRNAs found", ncbi_mrnas.len());
+    // now, add the proteins to the HashMap
+    let file = File::open(protein_file.clone());
+    let mut protein_reader : fasta::io::Reader<BufReader<File>>;
+    match file {
+        Ok(file) => {
+            protein_reader = fasta::io::Reader::new(BufReader::new(file));
+        }
+    
+        Err(e) => {
+            eprintln!("Error opening protein file {} : {}", protein_file, e);
+            std::process::exit(1);
+        }
+    }
+
+    for result in protein_reader.records(){
+        let record = result.expect("Error reading record from protein file");
+        let mut the_entry = NcbiSequence::default();
+        let id_string = match str::from_utf8(record.name()){
+            Ok(val) => {
+                val
+            },
+            Err (e) => {
+                panic!("Couldn't convert protein name to String, error was {}", e);
+            }
+        };
+
+        let sequence: Vec<char> = str::from_utf8(record.sequence().as_ref()).expect("Invalid UTF-8 sequence in protein").chars().collect();
+        if sequence[0] != 'M' && id_string[0..2] == "NP_".to_string() {
+            eprintln!("Non-methionine start AA of {} found in protein {}", sequence[0], id_string);
+        }
+        the_entry.id = id_string.to_string();
+        the_entry.protein_sequence = sequence;
+        if ncbi_proteins.insert(id_string.to_string(), the_entry) != None{
+            eprintln!("Duplicate protein key {} found", id_string);
+        }
+    }   
+    println!("{} proteins found", ncbi_proteins.len());
+
+    // and build a name, Record HashMap for the genome pieces.
+    // Keep these as noodles_fasta records because that package
+    // has good functions for subsetting records.
+    // This will bloat our memory usage, but avoids being dependent
+    // on the GTF file referencing chunks of the genome in the order they appear in the file
+    let file = File::open(genome_file.clone());
+    let mut genome_reader : fasta::io::Reader<BufReader<File>>;
+    match file {
+        Ok(file) => {
+            genome_reader = fasta::io::Reader::new(BufReader::new(file));
+        }
+    
+        Err(e) => {
+            eprintln!("Error opening genome file {} : {}", genome_file, e);
+            std::process::exit(1);
+        }
+    }
+    for result in genome_reader.records(){
+        let record = result.expect("Error reading record from genome file");
+
+        let id: String = match str::from_utf8(record.name()){
+            Ok(val) => {
+                val.to_string()
+            },
+            Err (e) => {
+                panic!("Couldn't convert genome name to String, error was {}", e);
+            }
+        };
+        if ncbi_genomes.contains_key(&id){
+            eprintln!("Duplicate contig {} found", id);
+        }
+        ncbi_genomes.insert(id, record);
+    }
+
+    // Ok, we're finally ready to start parsing the GTF file.
     // Open the GTF file and create a reader
-    let file = File::open(gtffile.clone());
+    let file = File::open(gtf_file.clone());
     let mut gtf_reader : gtf::io::Reader<BufReader<File>>;
     match file {
         Ok(file) => {
             gtf_reader = gtf::io::Reader::new(BufReader::new(file));
         }
         Err(e) => {
-            eprintln!("Error opening GTF file {} : {}", gtffile, e);
+            eprintln!("Error opening GTF file {} : {}", gtf_file, e);
             std::process::exit(1);
         }
     }
-
-    // Open the FASTA file and create a reader
-    let file = File::open(fastafile.clone());
-    let mut fasta_reader : fasta::io::Reader<BufReader<File>>;
-    match file {
-        Ok(file) => {
-            fasta_reader = fasta::io::Reader::new(BufReader::new(file));
-        }
-    
-        Err(e) => {
-            eprintln!("Error opening FASTA file {} : {}", fastafile, e);
-            std::process::exit(1);
-        }
-    }
-
-    let mut fasta_result = fasta_reader.records().next();
-    let mut current_fasta_record : fasta::Record;
-    match fasta_result {
-        Some(record) => {
-            //println!("Fasta record: {}", String::from_utf8(record.expect("Failed to get record").name().to_vec()).expect("Failed to convert record name to string"));
-            current_fasta_record = record.expect("Failed to get record");
-        }
-        None => {
-            eprintln!("Error reading FASTA file: No record found at start of file");
-            std::process::exit(1)   
-        }
-    }
-   
-
-    // This loop is a bit convoluted because we don't know when we've found the end of 
-    // a GTF gene until we hit the start of the next one.  So, we keep a state variable
-    // (in_protein_coding) that records whether we're in GTF records for a protein coding gene.
 
     // Iterate through GTF records until we find the start of a gene.
     // If we're in a protein_coding gene, build a vector of the records that describe the gene.
@@ -95,8 +191,12 @@ fn main() {
         else{  // This is a gene record, make sure it's for a protein coding gene
             if in_protein_coding{ // We just finished reading the records for a protein coding gene
                         // so process it
-                let the_gene = parse_gtf_gene(&gene_gtf_records, &current_fasta_record);
-                write_gene_traindata(the_gene);
+                let the_gene = parse_gtf_gene(&gene_gtf_records, &ncbi_genomes, &ncbi_proteins, &ncbi_mrnas);
+                match the_gene {
+                    Some(gene) => {write_gene_traindata(gene)},// Found a valid gene, write the training data for it.
+                    None => {},
+                }
+              //  write_gene_traindata(the_gene);
             }
             gene_gtf_records = Vec::new(); // clear this, since we're starting a new gene.
             let attrib = the_recbuf.attributes();
@@ -120,20 +220,7 @@ fn main() {
                 
             // If we make it here without hitting a continue, the GTF record is the start of a gene with the protein_coding type,
             // so start building the vector of records that represent the gene
-                
-            // First, though, make sure we have the FASTA record that goes with the source of this gene
-            while current_fasta_record.name() != the_recbuf.reference_sequence_name() {
-                fasta_result = fasta_reader.records().next();
-                match fasta_result {
-                    Some(record) => {
-                        current_fasta_record = record.expect("Failed to get record");
-                    }
-                    None => {
-                        eprintln!("End of FASTA file reached before finding sequence for gene {}", the_recbuf.reference_sequence_name());
-                        std::process::exit(1);
-                    }
-                }
-            }
+
 
                     
         }   
@@ -144,7 +231,8 @@ fn main() {
 
 // parse the GTF records that describe a gene into a structure
 // requires that the gene is a protein coding gene
-fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fasta::Record) -> Gene{
+fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&HashMap<String, noodles_fasta::Record>, ncbi_proteins:&HashMap<String, NcbiSequence>, 
+    ncbi_mrnas:&HashMap<String, NcbiSequence>) -> Option<Gene>{
     let mut the_gene = Gene{
         gene_id: String::new(),
         start: 0,
@@ -193,10 +281,10 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
             
             Ok("transcript") => {
             // start of new protein, so push old one onto gene list if there is one.
-                if the_protein.name != None{ // There was a previous protein.  Push it onto the gene's list and create a new one
+                if the_protein.name != None && sanity_check(&the_protein){ // There was a previous protein, and it was well-defined
                     the_gene.proteins.push(the_protein);
-                    the_protein = Protein::default();
                 };
+                the_protein = Protein::default();
                 // Grab what information we can from this record
                 the_protein.mrna_start = record.start().get() ;
                 the_protein.mrna_end = record.end().get();
@@ -204,7 +292,8 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                 let start = noodles_core::Position::try_from(the_protein.mrna_start).expect("Couldn't generate Position from mrna_start");
                 let end = noodles_core::Position::try_from(the_protein.mrna_end).expect("Couldn't generate position from mrna_end");
 
-
+                let fasta_source: String = record.reference_sequence_name().to_str().expect("Couldn't convert GTF source to string").to_string();
+                let fasta_record = ncbi_genomes.get(&fasta_source).expect("Couldn't find DNA for source"); 
                 // Fetch the DNA sequence from the FASTA record
                 match the_gene.strand{
                     Strand::Unknown => {                 
@@ -212,7 +301,12 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                         std::process::exit(1);
                     }
                     Strand::Forward => {
-                        the_protein.dna_sequence = Vec::from(fasta_record.sequence().get(start..=end).expect("Couldn't extract DNA sequence from forward strand transcript"));
+                        for residue in Vec::from(fasta_record.sequence().get(start..=end).expect("Couldn't extract DNA sequence from forward strand transcript")){
+                            for c in (residue as char).to_uppercase(){ // this bit of ugliness brought to you by the fact 
+                                // that to_uppercase() sometimes returns multiple characters, though that should never happen here.
+                                the_protein.dna_sequence.push(c);
+                            }  
+                        }
                     }
                     Strand::Reverse => {
                         the_protein.dna_sequence = Vec::new(); // make sure this starts empty
@@ -223,7 +317,10 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                                     eprintln!("Error encountered complementing DNA sequence: {}", e);
                                     std::process::exit(1);
                                 }
-                                Ok(val) => {the_protein.dna_sequence.push(val);}
+                                Ok(val) => { for c in (val as char).to_uppercase(){ // this bit of ugliness brought to you by the fact 
+                                    // that to_uppercase() sometimes returns multiple characters, though that should never happen here.
+                                    the_protein.dna_sequence.push(c);
+                                }}
                             }
                         }
                     }
@@ -236,6 +333,29 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                 // convert from 1-indexed positions within the FASTA record 
                 // to 0-indexed offsets within the transcript
                 // if reverse strand, handle the fact that we've reversed the transcript as part of complementing it
+                if the_protein.exons.len() == 0{ // This is the first exon, get the NCBI mRNA,
+                    let attrib = record.attributes();
+                    let mut transcript:String = match attrib.get(b"transcript_id") {
+                        None => {
+                            eprintln!("Transcript ID attribute wasn't found in CDS record");
+                            "bad_bad".to_string()
+                        }
+                        Some(val) => {
+                            val.as_string().expect("GTF protein_id attribute wasn't a string").to_string()
+                        }
+                    };
+                    if transcript.matches('_').count() > 1{ // variant naming
+         //               print!("Variant transcript name {} found,", transcript);
+                        let fields: Vec<&str> = transcript.split('_').collect();
+                        transcript = fields[..fields.len()-1].join("_");
+                    }
+                    let the_entry = ncbi_mrnas.get(&transcript);
+                    match the_entry{
+                        None => {
+                        }
+                        Some(val) => {the_protein.ncbi_mrna = val.mrna_sequence.clone()}
+                    }                      
+                }
                 let start:usize = match the_gene.strand{  
                     Strand::Forward => {
                         record.start().get() - the_protein.mrna_start
@@ -290,7 +410,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                         }
                     };
                     the_protein.coding_start = start_codon_start;
-
+                    the_protein.start_codon = vec!(start_codon_start, start_codon_start+1, start_codon_start+2);
                     // retrieve the protein name from the CDS record
                     let attrib = record.attributes();
                     match attrib.get(b"protein_id") {
@@ -300,6 +420,35 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                         }
                         Some(val) => {
                             the_protein.name = Some(val.as_string().expect("GTF protein_id attribute wasn't a string").to_string());
+                        }
+                    }
+                    
+                    let ncbi_protein_option = ncbi_proteins.get(&the_protein.name.clone().unwrap());
+                    let ncbi_protein = match ncbi_protein_option{
+                        Some(val) => val,
+                        None => {
+                            eprintln!("Unable to find NCBI protein entry for {}", the_protein.name.clone().unwrap());
+                            &NcbiSequence::default()
+                        }
+                    };
+                    the_protein.ncbi_protein = ncbi_protein.protein_sequence.clone();
+                    let attrib = record.attributes();
+                    match attrib.get(b"exception"){
+                        None =>{},                
+                        Some(val) =>{
+                            let the_value = val;
+                            if the_value.as_string().expect("Couldn't get exception value as string") == b"alternative start codon"{
+                                the_protein.alternative_start_codon = true;  // NCBI knows this has an alt start codon
+                            }
+                        }
+                    }
+                    match attrib.get(b"note"){
+                        None => {},
+                        Some (val) => {
+                            let the_value = val;
+                            if the_value.as_string().expect("Couldn't get exception value as string").to_string().contains("non-AUG"){
+                                the_protein.alternative_start_codon = true;  // NCBI knows this has an alt start codon
+                            }
                         }
                     }
                 }
@@ -352,8 +501,28 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
                         panic!("Reached impossible branch in computing start codon offset");
                     }
                 };
+
                 if record.end().get() - record.start().get() == 2{ // this is a well-formed start_codon entry, so check it
                     assert!(start_codon_start == the_protein.coding_start);
+                }
+
+                assert!((record.end().get() - record.start().get())+ 1 + the_protein.start_positions_found <=3); // make sure we haven't found too many start codon positions
+                match the_gene.strand{
+                    Strand::Forward => {
+                        for i in record.start().get()..=record.end().get(){
+                            the_protein.start_codon[the_protein.start_positions_found] = i - the_protein.mrna_start;
+                            the_protein.start_positions_found+=1; 
+                        }
+                    },
+                    Strand::Reverse => {
+                        for i in (record.start().get()..=record.end().get()).rev(){
+                            the_protein.start_codon[the_protein.start_positions_found] = the_protein.mrna_end - i;
+                            the_protein.start_positions_found +=1;
+                        }
+                    },
+                    Strand::Unknown => {
+                        panic!("Reached impossible branch in computing start codon location");
+                    }
                 }
             //    else{
               //      println!("miss-formed start_codon entry found for protein {:?}", the_protein.name);
@@ -396,17 +565,67 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , fasta_record:&fast
             } 
         }
     }
-    assert!(the_protein.name != None);  // shouldn't have an empty protein at this point
-    the_gene.proteins.push(the_protein);
 
-    the_gene
+    if sanity_check(&the_protein){ // this protein was well-defined in the file
+        the_gene.proteins.push(the_protein);
+    }
+    if the_gene.proteins.len() >0 {
+        Some(the_gene)
+    }
+    else{
+        None
+    }
 }
 
 fn write_gene_traindata(the_gene: Gene){
-    println!("Scanning gene {}", the_gene.gene_id);
     for protein in the_gene.proteins{
-        println!("Protein {:?} had coding_start {} and coding_end {}", protein.name, protein.coding_start, protein.coding_end);
-        println!("Start codon looks like {}{}{}", protein.dna_sequence[protein.coding_start] as char, protein.dna_sequence[protein.coding_start+1] as char, protein.dna_sequence[protein.coding_start+2] as char);
-        println!("");
+        if protein.alternative_start_codon  == false && (protein.dna_sequence[protein.start_codon[1]] != 'T' || protein.dna_sequence[protein.start_codon[2]] != 'G')
+        {
+            println!("Start codon looks like {}{}{}", protein.dna_sequence[protein.start_codon[0]] as char, protein.dna_sequence[protein.start_codon[1]] as char, 
+            protein.dna_sequence[protein.start_codon[2]] as char);
+        }
     }
+}
+
+// check a protein data structure to make sure it's been well-defined
+// NCBI GTF seems to contain some broken proteins, so need to check
+fn sanity_check(the_protein: &Protein)-> bool{
+    match &the_protein.name{ // Only want curated proteins in training data
+        None => {}, // This is a failure case, but don't fail here because we want to figure out what went wrong.
+        Some(name) => {
+            if name[0..3] != "NP_".to_string(){ // this is a non-curated protein, reject for quality
+                return false;
+            }
+        }
+    }
+
+    if the_protein.dna_sequence.len() == 0 || the_protein.ncbi_mrna.len() == 0 || the_protein.ncbi_protein.len() == 0{
+        // one or more of these weren't found 
+        eprintln!("Protein {:?} had at least one bad sequence field. dna_sequence length was {}, ncbi_mrna length was {}, ncbi_protein length was {}", the_protein.name, the_protein.dna_sequence.len(), 
+    the_protein.ncbi_mrna.len(), the_protein.ncbi_protein.len());
+        return false;
+    }
+
+    if the_protein.coding_start == std::usize::MAX || the_protein.coding_end == 0 || the_protein.coding_end <= the_protein.coding_start {
+        eprintln!("Protein {:?} had invalid coding start and/or end", the_protein.name);
+        // These fields weren't set or were set wrong
+        return false;
+    }
+    if the_protein.mrna_start == std::usize::MAX || the_protein.mrna_end == 0 || the_protein.mrna_end <= the_protein.mrna_start {
+        eprintln!("Protein {:?} had invalid coding start and/or end", the_protein.name);
+        // These fields weren't set or were set wrong
+        return false;
+    }
+
+    if the_protein.exons.len() == 0{  // poorly-defined protein had no exons
+        eprintln!("protein had no exons");
+        return false;
+    }
+    
+    if the_protein.name == None{ // This field wasn't set
+        eprintln!("Protein had missing name, rejecting");
+        return false;
+    }
+    // If we get this far, we've passed all the checks, so accept the protein
+    true
 }
