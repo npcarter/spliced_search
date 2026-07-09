@@ -38,6 +38,8 @@ pub struct Protein{
     pub alternative_start_codon: bool,
     pub start_codon: Vec<usize>,
     pub start_positions_found: usize,
+    pub stop_codon: Vec<usize>,
+    pub stop_positions_found: usize,
     pub wrong_transcript: bool, // record whether the protein's note says it does not match the transcript
     pub selenocystine: bool,
 }
@@ -61,6 +63,8 @@ impl Default for Protein{
             alternative_start_codon: false,
             start_codon: vec!(0,0,0),
             start_positions_found: 0,
+            stop_codon: vec!(0,0,0),
+            stop_positions_found: 0,
             wrong_transcript: false, 
             selenocystine: false,}
     }

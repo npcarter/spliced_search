@@ -535,6 +535,11 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                     }
                 };
                 the_protein.coding_end = coding_end;
+                // fill in default stop codon positions
+                assert!(the_protein.coding_end + 3 < the_protein.dna_sequence.len()); // make sure we won't go off the end of the protein
+                the_protein.stop_codon[0] = coding_end+1;  // This doesn't have to be handled differently for reverse strand because we've already reversed
+                the_protein.stop_codon[1] = coding_end+2;
+                the_protein.stop_codon[2] = coding_end+3;
             }
 
             Ok("start_codon") => {  // If the protein has one of these entries, check that 
@@ -580,15 +585,15 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
               //      println!("miss-formed start_codon entry found for protein {:?}", the_protein.name);
                // }
             }
-
-            Ok("stop_codon") => {
+            Ok("stop_codon") => {  // If the protein has one of these entries, check that 
+                // it matches what we computed
                 let stop_codon_start = match the_gene.strand{
                     Strand::Forward => {
-                        assert!(record.start().get() <= the_protein.mrna_end);  // codon start shouldn't be after mrna_end
+                        assert!(record.end().get() <= the_protein.mrna_end);  // stop codon shouldn't be outside mrna
                         record.start().get() - the_protein.mrna_start
                     }
                     Strand::Reverse => {
-                        assert!(record.end().get() >= the_protein.mrna_start); // codon start shouldn't be before mrna_end 
+                        assert!(record.start().get() >= the_protein.mrna_start); // codon start shouldn't be after mrna end 
                         // on reverse strand
                         the_protein.mrna_end - record.end().get()
                     }
@@ -596,13 +601,30 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         panic!("Reached impossible branch in computing start codon offset");
                     }
                 };
-                if record.end().get() - record.start().get()==2{ // This is a well-formed stop codon entry, so use it
-                    if the_protein.coding_end > stop_codon_start{
-                        println!("beep");
+
+                assert!((record.end().get() - record.start().get())+ 1 + the_protein.stop_positions_found <=3); // make sure we haven't found too many stop codon positions
+                match the_gene.strand{
+                    Strand::Forward => {
+                        for i in record.start().get()..=record.end().get(){
+                            the_protein.stop_codon[the_protein.stop_positions_found] = i - the_protein.mrna_start;
+                            the_protein.stop_positions_found+=1; 
+                        }
+                    },
+                    Strand::Reverse => {
+                        for i in (record.start().get()..=record.end().get()).rev(){
+                            the_protein.stop_codon[the_protein.stop_positions_found] = the_protein.mrna_end - i;
+                            the_protein.stop_positions_found +=1;
+                        }
+                    },
+                    Strand::Unknown => {
+                        panic!("Reached impossible branch in computing start codon location");
                     }
-                    assert!(the_protein.coding_end <= stop_codon_start);
                 }
+            //    else{
+              //      println!("miss-formed start_codon entry found for protein {:?}", the_protein.name);
+               // }
             }
+
             Ok("Selenocysteine") => {
                 // special entry that records the presence of a selenocystine.  We don't care about that, so do nothing.
             }
@@ -740,6 +762,21 @@ eprintln!("Rejecting {:?} because computed protein did not match reference prote
             return false;
         }
     }
+
+    // check the stop codon
+    let stop_codon: String = vec!(the_protein.dna_sequence[the_protein.stop_codon[0]], 
+        the_protein.dna_sequence[the_protein.stop_codon[1]], the_protein.dna_sequence[the_protein.stop_codon[2]]).into_iter().collect();
+
+        let valid_stop: bool = match stop_codon.as_str(){
+            "TAA" => {true},
+            "TAG" => {true},
+            "TGA" => {true},
+            _ => {false},
+        };
+        if !valid_stop{
+            eprintln!("Rejecting {:?} because of invalid stop codon {}", the_protein.name, stop_codon);
+            return false;
+        }
     // If we get this far, we've passed all the checks, so accept the protein
     true
 }
