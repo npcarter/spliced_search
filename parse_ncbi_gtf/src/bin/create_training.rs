@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader};
+use std::io::{BufReader, BufWriter, Write};
 use clap::Parser;
 use noodles_gtf as gtf;
 use noodles_fasta as fasta;
@@ -16,6 +16,7 @@ use rand::prelude::*;
 #[clap(author, version, about, long_about = None)]
 struct Cli {
     basename: String,
+    outfile: String,
 }
 
 
@@ -168,6 +169,15 @@ fn main() {
         }
     }
 
+    // Open the output file and create a writer
+    let file = File::create(args.outfile.clone());
+    let mut out_writer = match file{
+        Ok(file) => {BufWriter::new(file)},
+        Err(e) => {
+            eprintln!("Error opening output file {} : {}", args.outfile, e);
+            std::process::exit(1);
+        }
+    };
     // Iterate through GTF records until we find the start of a gene.
     // If we're in a protein_coding gene, build a vector of the records that describe the gene.
 
@@ -177,7 +187,7 @@ fn main() {
 
     let mut in_protein_coding = false;
     let mut gene_gtf_records = Vec::new();
-
+    let mut isoforms: Vec<u32> = vec![0; 100];
     // If we get here, we've opened both the GTF and FASTA files successfully
     for record_result in gtf_reader.record_bufs() {             
         let the_recbuf = record_result.expect("Unable to get GTF record buffer from file");
@@ -193,7 +203,16 @@ fn main() {
                         // so process it
                 let the_gene = parse_gtf_gene(&gene_gtf_records, &ncbi_genomes, &mut ncbi_proteins, & mut ncbi_mrnas);
                 match the_gene {
-                    Some(gene) => { count += write_gene_traindata(gene)},// Found a valid gene, write the training data for it.
+                    Some(gene) => { 
+                        let num_proteins = gene.proteins.len();
+                        if num_proteins < 100{
+                            isoforms[num_proteins]+=1
+                        }
+                        else{
+                            isoforms[99] +=1;
+                        }
+                        count+=write_gene_traindata(gene, &mut out_writer);// Found a valid gene, write the training data for it.
+                    },
                     None => {},
                 }
               //  write_gene_traindata(the_gene);
@@ -225,7 +244,16 @@ fn main() {
                     
         }   
     }
+    out_writer.flush().expect("Unable to flush output file at end of program"); // Make sure all the data is out to disk
     println!("Found {} usable proteins", count);
+    println!("isoform counts: {:?}", isoforms);
+    let mut gene_count = 0;
+    let mut protein_count: u32 = 0;
+    for index in 1..isoforms.len(){
+        gene_count += isoforms[index];
+        protein_count += index as u32 * isoforms[index];
+    }
+    println!("Counted {} genes and {} proteins, average proteins/gene = {}", gene_count, protein_count, protein_count as f32/gene_count as f32);
 }   
 
 
@@ -241,12 +269,14 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
         strand: Strand::Unknown,
         proteins: Vec::new(),
     };
-
+    //let mut one_nucleotide_exon_found = false;
+    //let mut first_coding = true;
     let mut the_protein = Protein::default();
     let mut rng = rand::rng(); 
     for record in gtf_records {
         match record.ty().to_str() { // what type of record is this
             Ok("gene")  => { // start of new gene, create the record
+
                 assert!(the_gene.gene_id == ""); // There should only be one gene record in a gene.
 
                 let attrib = record.attributes();
@@ -297,7 +327,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                             }
                         }
                     }
-                };
+                }
                 the_protein = Protein::default();
                 // Grab what information we can from this record
                 let fasta_source: String = record.reference_sequence_name().to_str().expect("Couldn't convert GTF source to string").to_string();
@@ -375,7 +405,9 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         None => {
                         }
                         Some(val) => {the_protein.ncbi_mrna = val.mrna_sequence.clone()}
-                    }                      
+                    } 
+
+
                 }
                 let start:usize = match the_gene.strand{  
                     Strand::Forward => {
@@ -400,12 +432,35 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                     }
                 };
                     record.start().get();
-
+                let attrib = record.attributes();
+                let product:String = match attrib.get(b"product"){
+                    None => {
+                        eprintln!("Couldn't find a product attribute in protein {:?}", the_protein.name);
+                        "".to_string()
+                    }
+                    Some(val )=> {val.as_string().expect("GTF product attribute wasn't a string").to_string()}
+                };            
+                let product_fields:Vec<&str> = product.split_whitespace().collect();
+                if product_fields.len() > 1{  // There's enough data in the product annotation that it might have the fields we want.
+                   for index in 0..product_fields.len()-1{
+                        if product_fields[index] == "transcript"{
+                            assert!(product_fields.len() >= index+2, "Found transcript too late in product fields to parse");
+                            if product_fields[index+1] == "variant"{
+                                assert!(product_fields.len() >= index+3, "Found transcript too late in product fields to parse");
+                                the_protein.transcript_label = product_fields[index+2].to_string();
+                            }
+                            else{
+                                the_protein.transcript_label = product_fields[index+1].to_string();
+                            }
+                        }
+                    }
+                }
                 let the_exon = Exon{
                     start: start,
                     end: end,
                     start_offset: None,
                 };
+
                 the_protein.exons.push(the_exon);
             }
             
@@ -413,6 +468,47 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                 // If this is the first coding segment, we need to extract the
                 // name of the protein and the start position of the start codon
                 if the_protein.name == None{  // This is the first coding segment of the protein
+                    let attrib = record.attributes();
+
+                    match attrib.get(b"protein_id") {
+                        None => {
+                            eprintln!("Protein_id attribute wasn't found in CDS record");
+                            the_protein.name = Some("NONE".to_string());
+                        }
+                        Some(val) => {
+                            the_protein.name = Some(val.as_string().expect("GTF protein_id attribute wasn't a string").to_string());
+                        }
+                    }
+                    
+                    let ncbi_protein_option = ncbi_proteins.get(&the_protein.name.clone().unwrap());
+                    let ncbi_protein: & NcbiSequence= match ncbi_protein_option{
+                        Some(val) => val,
+                        None => {
+                            eprintln!("Unable to find NCBI protein entry for {}", the_protein.name.clone().unwrap());
+                            & NcbiSequence::default()
+                        }
+                    };
+                    the_protein.ncbi_protein = ncbi_protein.protein_sequence.clone();
+                                            // try to figure out if this protein is the primary product
+                    let product:String = match attrib.get(b"product"){
+                        None => {
+                                //eprintln!("Couldn't find a product attribute in protein {:?}", the_protein.name);
+                            "".to_string()
+                            }
+                        Some(val )=> {val.as_string().expect("GTF product attribute wasn't a string").to_string()}
+                        };            
+                    let product_fields:Vec<&str> = product.split_whitespace().collect();
+                    for index in 0..product_fields.len()-1{
+                        if product_fields[index] == "isoform"{
+                            assert!(product_fields.len() >= index+2, "Found isoform too late in product fields to parse");
+                            if product_fields.len() < index+3 || product_fields[index+2] != "precursor"{
+                                the_protein.isoform_label = product_fields[index+1].to_string();
+                            }
+                            else{
+                                the_protein.isoform_label = format!{"{}_precursor", product_fields[index+1]};
+                            }
+                        }
+                    }
                     
                     // compute the offset from the start of the first codon to the first
                     // nucleotide in the start codon, accounting for reverse-strand effects
@@ -433,26 +529,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                     the_protein.coding_start = start_codon_start;
                     the_protein.start_codon = vec!(start_codon_start, start_codon_start+1, start_codon_start+2);
                     // retrieve the protein name from the CDS record
-                    let attrib = record.attributes();
-                    match attrib.get(b"protein_id") {
-                        None => {
-                            eprintln!("Protein_id attribute wasn't found in CDS record");
-                            the_protein.name = Some("NONE".to_string());
-                        }
-                        Some(val) => {
-                            the_protein.name = Some(val.as_string().expect("GTF protein_id attribute wasn't a string").to_string());
-                        }
-                    }
-                    
-                    let ncbi_protein_option = ncbi_proteins.get(&the_protein.name.clone().unwrap());
-                    let ncbi_protein: & NcbiSequence= match ncbi_protein_option{
-                        Some(val) => val,
-                        None => {
-                            eprintln!("Unable to find NCBI protein entry for {}", the_protein.name.clone().unwrap());
-                            & NcbiSequence::default()
-                        }
-                    };
-                    the_protein.ncbi_protein = ncbi_protein.protein_sequence.clone();
+
                     let attrib = record.attributes();
                     match attrib.get(b"exception"){
                         None =>{},                
@@ -498,7 +575,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                             for value in the_values{
                             let val_string = value.to_str().expect("Couldn't convert transl_except value to string").to_string();
                             if val_string.contains("aa:Sec"){ // other way of indicating selenocystine
-                                the_protein.selenocystine = true;  // NCBI knows this has an alt start codon
+                                the_protein.selenocystine = true;
                             }
                         }
                         }
@@ -540,6 +617,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                 the_protein.stop_codon[0] = coding_end+1;  // This doesn't have to be handled differently for reverse strand because we've already reversed
                 the_protein.stop_codon[1] = coding_end+2;
                 the_protein.stop_codon[2] = coding_end+3;
+
             }
 
             Ok("start_codon") => {  // If the protein has one of these entries, check that 
@@ -585,22 +663,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
               //      println!("miss-formed start_codon entry found for protein {:?}", the_protein.name);
                // }
             }
-            Ok("stop_codon") => {  // If the protein has one of these entries, check that 
-                // it matches what we computed
-                let stop_codon_start = match the_gene.strand{
-                    Strand::Forward => {
-                        assert!(record.end().get() <= the_protein.mrna_end);  // stop codon shouldn't be outside mrna
-                        record.start().get() - the_protein.mrna_start
-                    }
-                    Strand::Reverse => {
-                        assert!(record.start().get() >= the_protein.mrna_start); // codon start shouldn't be after mrna end 
-                        // on reverse strand
-                        the_protein.mrna_end - record.end().get()
-                    }
-                    Strand::Unknown => {
-                        panic!("Reached impossible branch in computing start codon offset");
-                    }
-                };
+            Ok("stop_codon") => {
 
                 assert!((record.end().get() - record.start().get())+ 1 + the_protein.stop_positions_found <=3); // make sure we haven't found too many stop codon positions
                 match the_gene.strand{
@@ -647,7 +710,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
             }
             Some(val) => {
                 if val.already_found{
-                   // eprintln!("2 NCBI protein entry for {} already found, skipping", the_protein.name.clone().unwrap());
+                   //eprintln!("2 NCBI protein entry for {} already found, skipping", the_protein.name.clone().unwrap());
                 }
                 else{
                     val.already_found = true;
@@ -664,13 +727,218 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
     }
 }
 
-fn write_gene_traindata(the_gene: Gene)-> u64{
+fn find_primary_isoform(the_gene: &Gene) -> usize{
+    if the_gene.proteins.len() == 1{
+        // simplest case: only one protein in this gene
+        return std::usize::MAX; // special code to convey one-protein gene to calling function
+    }
+
+    let mut x1_isoform: usize = std::usize::MAX; 
+    let mut primary_isoform: usize = std::usize::MAX;
+    let mut precursor_isoform: usize = std::usize::MAX;
+    let mut transcript_isoform: usize = std::usize::MAX;
+    let mut transcript_x1_isoform: usize = std::usize::MAX;
+    for (index,the_protein) in (&the_gene.proteins).into_iter().enumerate(){
+        if the_protein.isoform_label == "a" || the_protein.isoform_label == "1" || the_protein.isoform_label == "A" ||
+        the_protein.isoform_label == "1a"|| the_protein.isoform_label == the_gene.gene_id {
+            if index < primary_isoform{ // this protein is the primary isoform
+                primary_isoform = index;
+            }
+        }
+        if the_protein.isoform_label == "a_precursor" || the_protein.isoform_label == "1_precursor" || the_protein.isoform_label == "A_precursor"{
+            if index < primary_isoform{ // this protein is the primary isoform
+                precursor_isoform = index;
+            }
+        }
+        if the_protein.isoform_label == "X1"{ // if there isn't an a isoform, we'll go with an X1
+            if index < x1_isoform{
+                x1_isoform = index;
+            }
+        }
+        if the_protein.transcript_label == "1" || the_protein.transcript_label == "a" || the_protein.transcript_label == "A"{
+            if index < transcript_isoform{
+                transcript_isoform = index;
+            }
+        }
+        if the_protein.transcript_label == "X1"{ // if there isn't an a isoform, we'll go with an X1
+            if index < transcript_x1_isoform{
+                transcript_x1_isoform = index;
+            }
+        }
+    }
+    // Assign primary_isoform in descending order of priority by type of information
+    if primary_isoform < std::usize::MAX{ //found a primary isoform
+        return primary_isoform;
+    }
+    else if x1_isoform < std::usize::MAX{
+        return x1_isoform;
+    }
+    else if transcript_isoform < std::usize::MAX{
+        return transcript_isoform;
+    }
+    else if transcript_x1_isoform < std::usize::MAX{
+        return transcript_x1_isoform;
+    }
+    else if precursor_isoform < std::usize::MAX{
+        return 0;
+    }
+    else{
+        return 0; // if all else fails, choose the first protein in the list
+    }
+}
+
+fn write_gene_traindata(the_gene: Gene, out_writer: &mut BufWriter<File>)-> u64{()
     let mut count = 0;
-    for protein in the_gene.proteins{
- 
 
-        count +=1;
+    let mut primary_isoform = find_primary_isoform(&the_gene);
+    let single_protein_gene = match primary_isoform{
+        std::usize::MAX => {
+            primary_isoform = 0;
+            true
+        }
+        _ => {false}
+    };
+    for (index, protein) in (&the_gene.proteins).into_iter().enumerate(){
+        // Start with everything in intergenic region
+        let mut state_vec:Vec<FsmState> = vec![FsmState::Intergenic; protein.dna_sequence.len()];
+        let mut current_exon = 0;
 
+        // don't need to worry about forward and reverse strand here because we've done the re-ordering already
+        while protein.exons[current_exon].end <= protein.start_codon[2]{
+            // Skip any exons that don't have coding positions
+            current_exon+=1;
+            assert!(current_exon < protein.exons.len(), "Couldn't find an exon that contained the last position of the start codon");
+        }
+
+        let first_coding_position : usize;
+        if protein.start_codon[2] < protein.exons[current_exon].start{
+            //start codon ended the previous exon
+            first_coding_position = protein.exons[current_exon].start;
+        }
+        else{
+            first_coding_position = protein.start_codon[2]+1;
+        }
+
+
+        let mut in_exon = true;
+        let mut codon_position;
+        if first_coding_position == protein.exons[current_exon].end{
+            // The first coding nucleotide was at the end of an exon.
+            in_exon = false;
+            state_vec[first_coding_position] = FsmState::LastStart;
+            codon_position = 0; // This will put us in Intron0 for the intron, which 
+            // will then line up correctly for the next exon
+        }
+        else{
+            state_vec[first_coding_position] = FsmState::Start;
+            codon_position = 1; // want to be in exon1 for the next position if its in the 
+            // same exon as the start.
+        }
+
+
+        let mut next_exon_start: usize;
+        //figure out where the exon after the current one starts, if there is one.
+        if current_exon < protein.exons.len() -1{
+            next_exon_start = protein.exons[current_exon + 1].start;
+        }
+        else{
+            next_exon_start = std::usize::MAX;
+        }
+
+
+        // Start at position 1 because of special case for the first coding nucleotide
+
+        for index in first_coding_position+1 .. protein.stop_codon[0]{
+            if in_exon{
+                state_vec[index] = EXONSTATES[codon_position].clone();
+                if index == protein.exons[current_exon].start{
+                    // we just started an exon, so mark that
+                    codon_position = (codon_position +1)%3;  // advance this because we don't 
+                    // advance the codon position in introns
+                    state_vec[index] = ASSSTATES[codon_position].clone();
+                }
+                if index == protein.exons[current_exon].end{
+                    // handle that we're leaving the exon
+                    state_vec[index] = DSSSTATES[codon_position].clone();
+                    in_exon = false;
+                    if current_exon < protein.exons.len() -1{
+                        next_exon_start = protein.exons[current_exon + 1].start;
+                    }
+                    else{
+                        next_exon_start = std::usize::MAX;
+                    }
+                }
+                else{ // don't advance codon position on entry into intron, 
+                // we handle that on exit.
+                    codon_position = (codon_position+1)%3; 
+                }
+            }
+            else{ // handle being in an intron
+                state_vec[index] = INTRONSTATES[codon_position].clone();
+                if index == next_exon_start -1{
+                    // this is the end of the intron
+                    in_exon = true;
+                    current_exon +=1;
+                    assert!(current_exon < protein.exons.len(), "Attempted to increment past end of exon vector in write_gene_traindata");
+                }
+            }
+        }
+
+        // We've gone through the whole coding sequence, now go back and patch the state of the last coding nucleotide
+        if in_exon{
+            // easy case.  Stop codon is in same exon as last coding nucleotide, but need to handle the case where the 
+            // last coding nucleotide was the first position in an exon
+            if protein.stop_codon[0]-1 == protein.exons[current_exon].start {
+                // The last coding position is the first nucleotide in an exon, so special case
+                state_vec[protein.stop_codon[0]-1] = FsmState::FirstStop;
+            }
+            else if protein.stop_codon[0] == protein.exons[current_exon].start{ //special case #2: stop codon at start of exon
+                assert!(current_exon > 0, "Found Stop codon at beginning of first exon, somethings's wrong");
+                state_vec[protein.exons[current_exon-1].end] = FsmState::Stop;
+                for index2 in protein.exons[current_exon-1].end+1..protein.stop_codon[0]{
+                    state_vec[index2] = FsmState::Intergenic;  // In this case, we've already processed at least one intron after the end of coding, so fix things up
+                }
+            }
+            else{
+                state_vec[protein.stop_codon[0]-1] = FsmState::Stop;
+            }
+        }
+        else{ // Need to go back and mark the last position in the previous exon as the end of coding
+            eprintln!{"Strange.  Protein {:?} had last state of coding while not in an exon.", protein.name}
+            if next_exon_start == std::usize::MAX{
+                // we didn't advance the current_exon count
+                state_vec[protein.exons[current_exon].end] = FsmState::Stop;
+            }
+            else{ // we did, so go back an exon
+                state_vec[protein.exons[current_exon-1].end] = FsmState::Stop;
+            }
+        }
+
+        
+        reverse_parse_fsm_states(&state_vec, &protein, &the_gene);
+        if fsm_sanity_check(&state_vec, &protein, &the_gene){
+            count +=1;
+            let output_name = match single_protein_gene{
+                true => {format!("{}^{}^single", the_gene.gene_id, protein.name.as_ref().unwrap())},
+                false => {
+                    match index == primary_isoform{
+                        true => {format!("{}^{}^primary", the_gene.gene_id, protein.name.as_ref().unwrap())},
+                        false => format!("{}^{}^nonprimary", the_gene.gene_id, protein.name.as_ref().unwrap()),
+                    }
+                }
+            };
+            out_writer.write_fmt(format_args!("{}\n", output_name)).expect("Failed first write to output file");
+            let mut temp1  = protein.dna_sequence.clone().into_iter().map(|c| c as u8).collect::<Vec<_>>();
+            temp1.push('\n' as u8);
+            out_writer.write(&temp1).expect("Failed second write to output file");
+            let mut  temp2 = state_vec.into_iter().map(|c| state_to_u8(c)).collect::<Vec<_>>();
+            temp2.push('\n' as u8);
+            out_writer.write(&temp2).expect("Failed third write to output file.");
+        }
+
+        /*else{
+            std::process::exit(1); // stop to make it easy to find problems
+        }*/
      //   println!("{}{}{}", protein.dna_sequence[protein.coding_end -2], protein.dna_sequence[protein.coding_end-1], protein.dna_sequence[protein.coding_end]);
     }
     count
@@ -757,8 +1025,8 @@ fn sanity_check(the_protein:&mut Protein)-> bool{
 
     for i in start_check..std::cmp::min(the_protein.computed_protein.len(), the_protein.ncbi_protein.len()){
         if the_protein.computed_protein[i] != the_protein.ncbi_protein[i]{
-eprintln!("Rejecting {:?} because computed protein did not match reference protein at position {}, {} vs {}", the_protein.name, i, 
-      the_protein.computed_protein[i], the_protein.ncbi_protein[i]);
+        eprintln!("Rejecting {:?} because computed protein did not match reference protein at position {}, {} vs {}", the_protein.name, i, 
+        the_protein.computed_protein[i], the_protein.ncbi_protein[i]);
             return false;
         }
     }
@@ -767,16 +1035,651 @@ eprintln!("Rejecting {:?} because computed protein did not match reference prote
     let stop_codon: String = vec!(the_protein.dna_sequence[the_protein.stop_codon[0]], 
         the_protein.dna_sequence[the_protein.stop_codon[1]], the_protein.dna_sequence[the_protein.stop_codon[2]]).into_iter().collect();
 
-        let valid_stop: bool = match stop_codon.as_str(){
-            "TAA" => {true},
-            "TAG" => {true},
-            "TGA" => {true},
-            _ => {false},
+    let valid_stop: bool = match stop_codon.as_str(){
+        "TAA" => {true},
+        "TAG" => {true},
+        "TGA" => {true},
+        _ => {false},
         };
-        if !valid_stop{
-            eprintln!("Rejecting {:?} because of invalid stop codon {}", the_protein.name, stop_codon);
+    if !valid_stop{
+        eprintln!("Rejecting {:?} because of invalid stop codon {}", the_protein.name, stop_codon);
+        return false;
+    }
+    for i in 1..(the_protein.exons.len()-1){
+        if the_protein.exons[i].end - the_protein.exons[i].start < 2{
+            eprintln!("Rejecting {:?} because of too short coding region of length {}", the_protein.name, the_protein.exons[i].end-the_protein.exons[i].start);
             return false;
         }
+    }
     // If we get this far, we've passed all the checks, so accept the protein
     true
+}
+
+fn fsm_sanity_check(state_vec:&Vec<FsmState>, the_protein: &Protein, the_gene: &Gene)->bool{
+    let mut coding_started = false;
+    let mut coding_ended = false;
+    let mut in_exon = false;
+    let mut codon_position = 0;
+ //   let mut coding_start_index = 0;
+    for (index, state) in state_vec.iter().enumerate(){
+        let index_position = find_position(index ,the_protein, the_gene);
+        match *state{
+            FsmState::Intergenic=> {  // Intergenic should only occur before coding starts and after it ends
+                if coding_started && !coding_ended{
+                    eprintln!("Fsm_sanity_check found Intergenic state in coding region");
+                    return false;
+                };
+            },
+
+            FsmState::Start => { // check that we don't have multiple starts or start after stop, then set coding_started
+   //             coding_start_index = index;
+                if coding_started{
+                    eprintln!("Fsm_sanity_check found coding start after coding had already started");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity check found coding start after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found coding start while in an exon");
+                    return false;
+                }
+                if codon_position != 0{
+                    eprintln!("Fsm_sanity check found coding start when the codon position was {}, instead of 0", codon_position);
+                    return false;
+                }
+                coding_started = true;
+                codon_position = 1;
+                in_exon = true;
+            },
+
+
+            FsmState::LastStart => { // check that we don't have multiple starts or start after stop, then set coding_started
+     //           coding_start_index = index;
+                if coding_started{
+                    eprintln!("Fsm_sanity_check found coding start after coding had already started");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity check found coding start after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found coding start while in an exon");
+                    return false;
+                }
+                if codon_position != 0{
+                    eprintln!("Fsm_sanity check found coding start when the codon position was {}, instead of 0", codon_position);
+                    return false;
+                }
+                coding_started = true;
+                codon_position = 0;
+                in_exon = false; // This state is for when the first coding position ends an exon
+            },
+
+            FsmState::Stop=> { // check that coding has started but not stopped, then set coding_ended
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found coding end before coding start");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found coding end after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found end of coding when not in an exon"); // leave this in so we can hand-check that it's only occurring for single-nucleotide exons 
+                }
+                if codon_position != 2{
+                    eprintln!("Fsm_sanity_check found coding end when codon position was {} instead of 2", codon_position);
+                    return false;
+                }
+                coding_ended = true;
+                codon_position = 0;
+                in_exon = false;
+            },
+            FsmState::FirstStop=> { // check that coding has started but not stopped, then set coding_ended
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found FirstSTop before coding start");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found FirstStop after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found FirstStop when in an exon"); // leave this in so we can hand-check that it's only occurring for single-nucleotide exons 
+                }
+                if codon_position != 1{
+                    eprintln!("Fsm_sanity_check found coding end when codon position was {} instead of 1", codon_position);
+                    return false;
+                }
+                coding_ended = true;
+                codon_position = 0;
+                in_exon = false;
+            },
+            FsmState::Exon0=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found exon position 0 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found exon position 0 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found exon position 0 outside of exon");
+                    return false;
+                }
+                if codon_position != 0{
+                    eprintln!("Fsm_sanity_check found exon position 0 when codon position was {} instead of 0 at index {}", codon_position, index_position);
+                    return false;
+                }
+                codon_position = 1;
+            },
+
+            FsmState::Exon1=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found exon position 1 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found exon position 1 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found exon position 1 outside of exon");
+                    return false;
+                }
+                if codon_position != 1{
+                    eprintln!("Fsm_sanity_check found exon position 1 when codon position was {} instead of 1 at index {}", codon_position, index_position);
+                    return false;
+                }
+                codon_position = 2;
+            },
+
+            FsmState::Exon2=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found exon position 2 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found exon position 2 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found exon position 2 outside of exon");
+                    return false;
+                }
+                if codon_position != 2{
+                    eprintln!("Fsm_sanity_check found exon position 2 when codon position was {} instead of 2 at index {}", codon_position, index_position);
+                    return false;
+                }
+                codon_position = 0;
+            },
+            
+            FsmState::Intron0=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found intron position 0 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found intron position 0 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found intron position 0 in an exon");
+                    return false;
+                }
+                if codon_position != 0{
+                    eprintln!("Fsm_sanity_check found intron position 0 when codon position was {} instead of 0 at index {}", codon_position, index_position);
+                    return false;
+                }
+                // codon position doesn't advance in introns
+            },
+            
+            FsmState::Intron1=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found intron position 1 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found intron position 1 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found intron position 1 in an exon");
+                    return false;
+                }
+                if codon_position != 1{
+                    eprintln!("Fsm_sanity_check found intron position 1 when codon position was {} instead of 1 at index {}", codon_position, index_position);
+                    return false;
+                }
+                // codon position doesn't advance in introns
+            },
+            
+            FsmState::Intron2=> {
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found intron position 2 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found intron position 2 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found intron position 2 in an exon");
+                    return false;
+                }
+                if codon_position != 2{
+                    eprintln!("Fsm_sanity_check found intron position 2 when codon position was {} instead of 2 at index {}", codon_position, index_position);
+                    return false;
+                }
+                // codon position doesn't advance in introns
+            },
+            
+            FsmState::Ass0=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found ASS position 0 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found ASS position 0 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found ASS position 0 in an exon");
+                    return false;
+                }
+                if codon_position != 2{ // Different because codon position doesn't advance in introns
+                    eprintln!("Fsm_sanity_check found ASS position 0 when codon position was {} instead of 2 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = true;
+                codon_position = 1;
+            },
+            
+            FsmState::Ass1=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found ASS position 1 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found ASS position 1 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found ASS position 1 in an exon");
+                    return false;
+                }
+                if codon_position != 0{ // Different because codon position doesn't advance in introns
+                    eprintln!("Fsm_sanity_check found ASS position 1 when codon position was {} instead of 0 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = true;
+                codon_position = 2;
+            },
+            
+            FsmState::Ass2=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found ASS position 2 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found ASS position 2 after end of coding");
+                    return false;
+                }
+                if in_exon{
+                    eprintln!("Fsm_sanity_check found ASS position 2 in an exon");
+                    return false;
+                }
+                if codon_position != 1{ // Different because codon position doesn't advance in introns
+                    eprintln!("Fsm_sanity_check found ASS position 2 when codon position was {} instead of 1 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = true;
+                codon_position = 0;
+            },
+            
+            FsmState::Dss0=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found DSS position 0 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found DSS position 0 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found DSS position 0 outside of an exon");
+                    return false;
+                }
+                if codon_position != 0{
+                    eprintln!("Fsm_sanity_check found DSS position 0 when codon position was {} instead of 0 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = false;
+                //don't change codon position as we enter intron
+            },
+            
+            FsmState::Dss1=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found DSS position 1 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found DSS position 1 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found DSS position 1 outside of an exon");
+                    return false;
+                }
+                if codon_position != 1{
+                    eprintln!("Fsm_sanity_check found DSS position 1 when codon position was {} instead of 1 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = false;
+                //don't change codon position as we enter intron
+            },
+            
+            FsmState::Dss2=>{
+                if !coding_started{
+                    eprintln!("Fsm_sanity_check found DSS position 2 before start of coding");
+                    return false;
+                }
+                if coding_ended{
+                    eprintln!("Fsm_sanity_check found DSS position 2 after end of coding");
+                    return false;
+                }
+                if !in_exon{
+                    eprintln!("Fsm_sanity_check found DSS position 2 outside of an exon");
+                    return false;
+                }
+                if codon_position != 2{
+                    eprintln!("Fsm_sanity_check found DSS position 2 when codon position was {} instead of 2 at index {}", codon_position, index_position);
+                    return false;
+                }
+                in_exon = false;
+                // don't change codon position as we enter intron
+            },
+        }
+    
+
+    }
+    true  // if we get this far, everything's passed
+}
+
+// debugging functions
+// Compute the sequence position of an offset within a protein's dna sequence
+fn find_position(offset: usize, the_protein: &Protein, the_gene: &Gene)->usize{
+    match the_gene.strand{  // proteins must contain at least one exon
+        Strand::Forward => { the_protein.mrna_start + offset},
+        Strand::Reverse => {the_protein.mrna_end - offset},
+        Strand::Unknown => {
+            eprintln!("Unknown strand type found in protein {:?}", the_protein.name);
+            0   
+        }
+    }
+}
+
+
+// try to re-generate a protein's start, stop, and coding region positions from the state vector as a debugging tactic
+fn reverse_parse_fsm_states(state_vec:&Vec<FsmState>, the_protein: &Protein, the_gene: &Gene){
+    let mut found_problem = false;
+    let mut which_cds = 0;
+    let mut cds_start:usize = 0;
+    let mut cds_end:usize;
+    let mut first_cds = false;
+
+    let mut last_cds_index = 0;
+    let mut first_coding_position: usize = 0;
+    
+    // Skip over any exons that don't contain coding data for the protein
+   // println!(""); // separate proteins
+   // println!("Reverse-parsing protein {}", the_protein.name.as_ref().unwrap());
+    for (index, state) in state_vec.iter().enumerate(){
+        let sequence_position = find_position(index, the_protein, the_gene);
+        match *state{
+            FsmState::Start | FsmState::LastStart => { // check that we don't have multiple starts or start after stop, then set coding_started
+  /*          if the_protein.name.clone().unwrap()== "NP_005092.1"{
+                println!("Found the protein we care about");
+            } */
+                while the_protein.exons[which_cds].end <= index {
+                    which_cds+=1;
+                }
+                if the_protein.exons[which_cds].start == index{ // The rare case where the start codon was at the end of an exon
+                    first_coding_position = index; // can't really check this case well, but it should be ok if every other check goes through.
+                }
+                else{ // common case where first coding is in same exon as start codon
+                    first_coding_position = the_protein.start_codon[2] +1;
+                }
+                if  index == first_coding_position{
+                  //  println!("First coding position {} matched expected value.", sequence_position);
+                }
+                else{
+                    println!("First coding position {} did not match expected value of {}", sequence_position, (find_position(first_coding_position, the_protein, the_gene))+1);
+                    found_problem = true;
+                }
+
+                cds_start = index; // start position is also the start of a coding region
+                first_cds = true;
+
+                while the_protein.exons[last_cds_index].end < the_protein.stop_codon[0] {
+                    last_cds_index +=1;
+                }
+            },
+            
+            FsmState::Stop=> { // check that coding has started but not stopped, then set coding_ended
+                cds_end = index;
+                //println!("Found CDS from {} to {}", find_position(cds_start, the_protein, the_gene), find_position(cds_end, the_protein, the_gene));
+             //   let mut cds_matched = true;
+                if first_cds{
+                    if cds_start != first_coding_position {
+                        println!("First coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.start_codon[2]+1, the_protein, the_gene));
+               //         cds_matched = false;
+                        found_problem = true;
+                    }
+                }                
+                else if cds_start != the_protein.exons[which_cds].start {
+                    println!("Coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.exons[which_cds].start, the_protein, the_gene));
+                 //   cds_matched = false;
+                    found_problem = true;
+                }
+                
+                if which_cds == last_cds_index{ // Common case: last coding nucleotide in last exon of protein
+                    if cds_end != the_protein.stop_codon[0]-1 {
+                        println!("Last coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.stop_codon[0]-1, the_protein, the_gene));
+                   //     cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else if the_protein.stop_codon[0] != the_protein.exons[which_cds +1].start{ // handle special case where stop codon is at the beginning of an exon
+                    println!("Found STOP in FSM state while not in last codon of protein");
+                    //cds_matched = false;
+                    found_problem = true;
+                    }
+    
+
+               /*  if cds_matched{
+                    //println!("CDS from FSM state matched protein record.");
+                }*/
+
+                if  index == (the_protein.stop_codon[0]-1) || (which_cds != last_cds_index && the_protein.stop_codon[0] == the_protein.exons[which_cds +1].start){
+                    // again, handle special case where stop codon is first nucleotides of exon
+                  //  println!("Last coding position {} matched expected value.", sequence_position);
+                }
+                else{
+                    println!("Last coding position {} did not match expected value of {}", sequence_position, (find_position(the_protein.stop_codon[0], the_protein, the_gene))-1);
+                    found_problem = true;
+                }
+
+            },
+            FsmState::FirstStop=> { // check that coding has started but not stopped, then set coding_ended
+                cds_end = index;
+                cds_start = index;
+                //println!("Found CDS from {} to {}", find_position(cds_start, the_protein, the_gene), find_position(cds_end, the_protein, the_gene));
+        //        let mut cds_matched = true;
+
+                if cds_start != the_protein.exons[which_cds].start {
+                    println!("Coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.exons[which_cds].start, the_protein, the_gene));
+          //          cds_matched = false;
+                    found_problem = true;
+                }
+                
+                if which_cds == last_cds_index{
+                    if cds_end != the_protein.stop_codon[0]-1 {
+                        println!("Last coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.stop_codon[0]-1, the_protein, the_gene));
+            //            cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else {
+                    println!("Found FirstStop in FSM state while not in last codon of protein");
+              //      cds_matched = false;
+                    found_problem = true;
+                }
+
+               /*  if cds_matched{
+                    println!("CDS from FSM state matched protein record.");
+                }*/
+
+                if  index == (the_protein.stop_codon[0]-1){
+                   // println!("Last coding position {} matched expected value.", sequence_position);
+                }
+                else{
+                    println!("Last coding position {} did not match expected value of {}", sequence_position, (find_position(the_protein.stop_codon[0], the_protein, the_gene))-1);
+                    found_problem = true;
+                }
+
+            },
+            FsmState::Ass0=>{
+                cds_start = index;
+                first_cds = false;
+            },
+            
+            FsmState::Ass1=>{
+                cds_start = index;
+                first_cds = false;
+            },
+            
+            FsmState::Ass2=>{
+                cds_start = index;
+                first_cds = false;
+            },
+            
+            FsmState::Dss0=>{
+                cds_end = index;
+                //let mut cds_matched = true;
+                //println!("Found CDS from {} to {}", find_position(cds_start, the_protein, the_gene), find_position(cds_end, the_protein, the_gene));
+                if first_cds{
+                    if cds_start != first_coding_position{
+                        println!("First coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.start_codon[2]+1, the_protein, the_gene));
+                  //      cds_matched = false;
+                        found_problem = true;
+                    }     
+                }           
+                else if cds_start != the_protein.exons[which_cds].start {
+                    println!("Coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.exons[which_cds].start, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                }
+                
+                if which_cds == last_cds_index{
+                    if cds_end != the_protein.stop_codon[0]-1 {
+                        println!("Last coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.stop_codon[0]-1, the_protein, the_gene));
+                      //  cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else if cds_end != the_protein.exons[which_cds].end {
+                    println!("Coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.exons[which_cds].end, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                    
+                }
+               /*  if cds_matched{
+                    println!("CDS from FSM state matched protein record.");
+                }*/
+                which_cds +=1;
+            },
+            
+            FsmState::Dss1=>{
+                cds_end = index;
+                //let mut cds_matched = true;
+                //println!("Found CDS from {} to {}", find_position(cds_start, the_protein, the_gene), find_position(cds_end, the_protein, the_gene));
+                if first_cds{
+                    if cds_start != first_coding_position {
+                        println!("First coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.start_codon[2]+1, the_protein, the_gene));
+                  //      cds_matched = false;
+                        found_problem = true;
+                    }
+                }                
+                else if cds_start != the_protein.exons[which_cds].start {
+                    println!("Coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.exons[which_cds].start, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                }
+                if which_cds == last_cds_index{
+                    if cds_end != the_protein.stop_codon[0]-1 {
+                        println!("Last coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.stop_codon[0]-1, the_protein, the_gene));
+                      //  cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else if cds_end != the_protein.exons[which_cds].end {
+                    println!("Coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.exons[which_cds].end, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                }
+               /*  if cds_matched{
+                    println!("CDS from FSM state matched protein record.");
+                }*/
+                which_cds +=1;
+            },
+            
+            FsmState::Dss2=>{
+                cds_end = index;
+                //let mut cds_matched = true;
+             //   println!("Found CDS from {} to {}", find_position(cds_start, the_protein, the_gene), find_position(cds_end, the_protein, the_gene));
+                if first_cds{
+                    if cds_start != first_coding_position {
+                        println!("First coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.start_codon[2]+1, the_protein, the_gene));
+                  //      cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else if cds_start != the_protein.exons[which_cds].start {
+                    println!("Coding region start of {} did not match expected {}", find_position(cds_start, the_protein, the_gene), find_position(the_protein.exons[which_cds].start, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                }
+                if which_cds == last_cds_index{
+                    if cds_end != the_protein.stop_codon[0]-1 {
+                        println!("Last coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.stop_codon[0]-1, the_protein, the_gene));
+                      //  cds_matched = false;
+                        found_problem = true;
+                    }                
+                }
+                else if cds_end != the_protein.exons[which_cds].end {
+                    println!("Coding region end of {} did not match expected {}", find_position(cds_end, the_protein, the_gene), find_position(the_protein.exons[which_cds].end, the_protein, the_gene));
+                    //cds_matched = false;
+                    found_problem = true;
+                }
+          /*       if cds_matched{
+                    println!("CDS from FSM state matched protein record.");
+                }*/
+                which_cds +=1;
+            },
+
+            _ => {},
+        }
+
+    }
+    if found_problem{
+        println!("FSM state vector did not match protein data structure");
+    }
+    else{
+      //  println!("FSM state vector matched protein data structure")
+    }
 }

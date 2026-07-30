@@ -1,3 +1,5 @@
+use std::u8;
+
 /* Shared types and functions for parse_ensembl_gtf */
 // Enum that records which strand a gene is on
 #[derive(PartialEq)]
@@ -42,6 +44,9 @@ pub struct Protein{
     pub stop_positions_found: usize,
     pub wrong_transcript: bool, // record whether the protein's note says it does not match the transcript
     pub selenocystine: bool,
+    pub isoform_label: String, // text extracted describing the isoform of the protein.  
+    pub transcript_label: String,
+    // This gets gathered early, and then used later, once we have information about all the proteins in a gene.
 }
 
 impl Default for Protein{
@@ -66,7 +71,10 @@ impl Default for Protein{
             stop_codon: vec!(0,0,0),
             stop_positions_found: 0,
             wrong_transcript: false, 
-            selenocystine: false,}
+            selenocystine: false,
+            isoform_label: "".to_string(),
+            transcript_label: "".to_string(),
+        }
     }
 }
 
@@ -177,3 +185,60 @@ pub fn translate_codon(codon: Vec<char>, selenocystine: bool) -> char{
 
     amino_acid
 }
+
+//FSM states
+#[derive(Clone, PartialEq, Debug)]
+pub enum FsmState{
+    Intergenic, 
+    Start,
+    LastStart, //special case for when the first coding nucleotide is the last one in an exon
+    Stop,
+    FirstStop, // special case to handle situation where the first nucleotide in an exon is 
+    // the last nucleotide in a protein.  Doesn't affect the training data, just the 
+    // internal bookkeeping and self-checks
+    Exon0,
+    Exon1,
+    Exon2,
+    Intron0,
+    Intron1,
+    Intron2,
+    Ass0,
+    Ass1,
+    Ass2,
+    Dss0,
+    Dss1,
+    Dss2,
+}
+
+//Function to generate numeric representation for an FSM State
+pub fn state_to_u8(state: FsmState) -> u8{
+    match state{
+        FsmState::Intergenic=> {'0' as u8}, 
+        FsmState::Start | FsmState::LastStart => {'1' as u8},
+        FsmState::Stop | FsmState::FirstStop=> {'2' as u8}, 
+        // all stop variants generate the same training state, the differences are just
+        // for sanity checks
+        FsmState::Exon0=> {  '3' as u8},
+        FsmState::Exon1=> {'4' as u8},
+        FsmState::Exon2=> {'5' as u8},
+        FsmState::Intron0=> {'6' as u8},
+        FsmState::Intron1=> {'7' as u8},
+        FsmState::Intron2=> {'8' as u8},
+        FsmState::Ass0=>{'9' as u8},
+        FsmState::Ass1=>{'A' as u8},
+        FsmState::Ass2=>{'B' as u8},
+        FsmState::Dss0=>{'C' as u8},
+        FsmState::Dss1=>{'D' as u8},
+        FsmState::Dss2=>{'E' as u8},
+    }
+}
+
+pub const EXONSTATES: &[FsmState] = &[FsmState::Exon0, FsmState::Exon1, FsmState::Exon2];
+
+pub const INTRONSTATES: &[FsmState] = &[FsmState::Intron0, FsmState::Intron1, FsmState::Intron2];
+
+// These match the exon states because Dss replaces the last coding position in an exon
+pub const DSSSTATES: &[FsmState] = &[FsmState::Dss0, FsmState::Dss1, FsmState::Dss2];
+
+// These match the exon states because Ass replaces the first coding position in an exon
+pub const ASSSTATES: &[FsmState] = &[FsmState::Ass0, FsmState::Ass1, FsmState::Ass2];
