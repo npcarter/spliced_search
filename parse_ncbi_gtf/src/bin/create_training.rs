@@ -110,8 +110,9 @@ fn main() {
         };
 
         let sequence: Vec<char> = str::from_utf8(record.sequence().as_ref()).expect("Invalid UTF-8 sequence in protein").chars().collect();
-        if sequence[0] != 'M' && id_string[0..2] == "NP_".to_string() {
-            eprintln!("Non-methionine start AA of {} found in protein {}", sequence[0], id_string);
+        if sequence.len() ==0 || id_string.len() < 3{
+            eprintln!("Empty protein sequence or invalid ID {} found, skipping", id_string);
+            continue;
         }
         the_entry.id = id_string.to_string();
         the_entry.protein_sequence = sequence;
@@ -238,11 +239,24 @@ fn main() {
             }
                 
             // If we make it here without hitting a continue, the GTF record is the start of a gene with the protein_coding type,
-            // so start building the vector of records that represent the gene
-
-
-                    
+            // so start building the vector of records that represent the gene             
         }   
+    }
+    if in_protein_coding{ // We were processing a protein coding gene when we hit the end of the file, so handle it
+        let the_gene = parse_gtf_gene(&gene_gtf_records, &ncbi_genomes, &mut ncbi_proteins, & mut ncbi_mrnas);
+        match the_gene {
+            Some(gene) => { 
+                let num_proteins = gene.proteins.len();
+                if num_proteins < 100{
+                    isoforms[num_proteins]+=1
+                }
+                else{
+                    isoforms[99] +=1;
+                }
+                count+=write_gene_traindata(gene, &mut out_writer);// Found a valid gene, write the training data for it.
+            },
+            None => {},
+        }
     }
     out_writer.flush().expect("Unable to flush output file at end of program"); // Make sure all the data is out to disk
     println!("Found {} usable proteins", count);
@@ -336,6 +350,9 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                 the_protein.mrna_end = record.end().get();
 
                 let seq_length = the_protein.mrna_end - the_protein.mrna_start +1;
+                if seq_length < 10{
+                    panic!("Transcript length {} for protein {:?} is too short, skipping", seq_length, the_protein.name);   
+                }
                 let start_padding = std::cmp::max(rng.random_range(0..seq_length/10), 100);
                 let end_padding = std::cmp::max(rng.random_range(0..seq_length/10), 100);
 
@@ -498,18 +515,19 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         Some(val )=> {val.as_string().expect("GTF product attribute wasn't a string").to_string()}
                         };            
                     let product_fields:Vec<&str> = product.split_whitespace().collect();
-                    for index in 0..product_fields.len()-1{
-                        if product_fields[index] == "isoform"{
-                            assert!(product_fields.len() >= index+2, "Found isoform too late in product fields to parse");
-                            if product_fields.len() < index+3 || product_fields[index+2] != "precursor"{
-                                the_protein.isoform_label = product_fields[index+1].to_string();
-                            }
-                            else{
-                                the_protein.isoform_label = format!{"{}_precursor", product_fields[index+1]};
+                    if product_fields.len() > 1{  // There's enough data in the product annotation that it might have the fields we want.
+                        for index in 0..product_fields.len()-1{
+                            if product_fields[index] == "isoform"{
+                                assert!(product_fields.len() >= index+2, "Found isoform too late in product fields to parse");
+                                if product_fields.len() < index+3 || product_fields[index+2] != "precursor"{
+                                    the_protein.isoform_label = product_fields[index+1].to_string();
+                                }
+                                else{
+                                    the_protein.isoform_label = format!{"{}_precursor", product_fields[index+1]};
+                                }
                             }
                         }
                     }
-                    
                     // compute the offset from the start of the first codon to the first
                     // nucleotide in the start codon, accounting for reverse-strand effects
                     let start_codon_start = match the_gene.strand{
@@ -746,7 +764,7 @@ fn find_primary_isoform(the_gene: &Gene) -> usize{
             }
         }
         if the_protein.isoform_label == "a_precursor" || the_protein.isoform_label == "1_precursor" || the_protein.isoform_label == "A_precursor"{
-            if index < primary_isoform{ // this protein is the primary isoform
+            if index < precursor_isoform{ // this protein is the primary isoform
                 precursor_isoform = index;
             }
         }
@@ -780,14 +798,14 @@ fn find_primary_isoform(the_gene: &Gene) -> usize{
         return transcript_x1_isoform;
     }
     else if precursor_isoform < std::usize::MAX{
-        return 0;
+        return precursor_isoform;
     }
     else{
         return 0; // if all else fails, choose the first protein in the list
     }
 }
 
-fn write_gene_traindata(the_gene: Gene, out_writer: &mut BufWriter<File>)-> u64{()
+fn write_gene_traindata(the_gene: Gene, out_writer: &mut BufWriter<File>)-> u64{
     let mut count = 0;
 
     let mut primary_isoform = find_primary_isoform(&the_gene);
@@ -930,10 +948,10 @@ fn write_gene_traindata(the_gene: Gene, out_writer: &mut BufWriter<File>)-> u64{
             out_writer.write_fmt(format_args!("{}\n", output_name)).expect("Failed first write to output file");
             let mut temp1  = protein.dna_sequence.clone().into_iter().map(|c| c as u8).collect::<Vec<_>>();
             temp1.push('\n' as u8);
-            out_writer.write(&temp1).expect("Failed second write to output file");
+            out_writer.write_all(&temp1).expect("Failed second write to output file");
             let mut  temp2 = state_vec.into_iter().map(|c| state_to_u8(c)).collect::<Vec<_>>();
             temp2.push('\n' as u8);
-            out_writer.write(&temp2).expect("Failed third write to output file.");
+            out_writer.write_all(&temp2).expect("Failed third write to output file.");
         }
 
         /*else{
