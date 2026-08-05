@@ -291,8 +291,8 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
         match record.ty().to_str() { // what type of record is this
             Ok("gene")  => { // start of new gene, create the record
 
-                assert!(the_gene.gene_id == ""); // There should only be one gene record in a gene.
-
+                assert!(the_gene.gene_id == "", "Found second gene record in {}", the_gene.gene_id); // There should only be one gene record in a gene.
+                assert!(the_protein.name == None, "Found protein {:?} at start of gene record", the_protein.name);
                 let attrib = record.attributes();
                 match attrib.get(b"gene_id") {
                     None => {
@@ -322,6 +322,57 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         the_gene.strand = Strand::Reverse;
                     }
                 } 
+
+                // Get the start and end positions of the gene
+                let fasta_source: String = record.reference_sequence_name().to_str().expect("Couldn't convert GTF source to string").to_string();
+                let fasta_record = ncbi_genomes.get(&fasta_source).expect("Couldn't find DNA for source"); 
+                the_protein.mrna_start = record.start().get() ;
+                the_protein.mrna_end = record.end().get();
+
+                let seq_length = the_protein.mrna_end - the_protein.mrna_start +1;
+                if seq_length < 10{
+                    panic!("Transcript length {} for protein {:?} is too short, skipping", seq_length, the_protein.name);   
+                }
+                let start_padding = std::cmp::max(rng.random_range(0..seq_length/10), 100);
+                let end_padding = std::cmp::max(rng.random_range(0..seq_length/10), 100);
+
+                the_protein.mrna_start = std::cmp::max(the_protein.mrna_start.saturating_sub(start_padding), 1);
+                the_protein.mrna_end = std::cmp::min(the_protein.mrna_end.saturating_add(end_padding), fasta_record.sequence().len());
+                let start = noodles_core::Position::try_from(the_protein.mrna_start).expect("Couldn't generate Position from mrna_start");
+                let end = noodles_core::Position::try_from(the_protein.mrna_end).expect("Couldn't generate position from mrna_end");
+
+
+                // Fetch the DNA sequence from the FASTA record
+                match the_gene.strand{
+                    Strand::Unknown => {                 
+                        eprintln!("Gene record had unknown strand after transcript line.");
+                        std::process::exit(1);
+                    }
+                    Strand::Forward => {
+                        for residue in Vec::from(fasta_record.sequence().get(start..=end).expect("Couldn't extract DNA sequence from forward strand transcript")){
+                            for c in (residue as char).to_uppercase(){ // this bit of ugliness brought to you by the fact 
+                                // that to_uppercase() sometimes returns multiple characters, though that should never happen here.
+                                the_protein.dna_sequence.push(c);
+                            }  
+                        }
+                    }
+                    Strand::Reverse => {
+                        the_protein.dna_sequence = Vec::new(); // make sure this starts empty
+                        // complement function appears to complement residues, but not reverse order.
+                        for residue in fasta_record.sequence().slice(start..=end).expect("Couldn't extract DNA sequence from reverse strand transcript").complement().rev(){
+                            match residue{
+                                Err(e) => {
+                                    eprintln!("Error encountered complementing DNA sequence: {}", e);
+                                    std::process::exit(1);
+                                }
+                                Ok(val) => { for c in (val as char).to_uppercase(){ // this bit of ugliness brought to you by the fact 
+                                    // that to_uppercase() sometimes returns multiple characters, though that should never happen here.
+                                    the_protein.dna_sequence.push(c);
+                                }}
+                            }
+                        }
+                    }
+                }
             }
             
             Ok("transcript") => {
@@ -342,7 +393,9 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         }
                     }
                 }
-                the_protein = Protein::default();
+                the_protein = Protein::default(); // If we have a gene entry followed by a transcript, this is a bit
+                // inefficient, but necessary to handle the case of gene record without transcript.
+
                 // Grab what information we can from this record
                 let fasta_source: String = record.reference_sequence_name().to_str().expect("Couldn't convert GTF source to string").to_string();
                 let fasta_record = ncbi_genomes.get(&fasta_source).expect("Couldn't find DNA for source"); 
@@ -396,7 +449,33 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
             }
             
             Ok("exon") => {  // parse the record and add an exon to the protein's list
+                if the_protein.cds_seen == true{
+                    // this is the start of a new protein, even though we haven't seen a transcript record.
+                    let mut new_protein = Protein::default();
+                    // copy the data we need from the previous protein.
+                    new_protein.mrna_start = the_protein.mrna_start;
+                    new_protein.mrna_end = the_protein.mrna_end;
+                    new_protein.dna_sequence = the_protein.dna_sequence.clone();
 
+                    // push the protein on the gene's list if it passes validity checks.
+                    if the_protein.name != None && sanity_check(&mut  the_protein){ // There was a previous protein, and it was well-defined
+                        match ncbi_proteins.get_mut(&the_protein.name.clone().unwrap()){
+                            None => {
+                                eprintln!("NCBI protein entry for {} not found, skipping", the_protein.name.clone().unwrap());
+                            }
+                            Some(val) => {
+                                if val.already_found{
+                            //        eprintln!("NCBI protein entry for {} already found, skipping", the_protein.name.clone().unwrap());
+                                }
+                                else{
+                                    val.already_found = true;
+                                    the_gene.proteins.push(the_protein);
+                                }
+                            }
+                        }
+                    }
+                    the_protein = new_protein; // start working on the new protein
+                }
                 assert!(record.start().get() <= record.end().get()); // check to make sure our expectations about start and end are preserved
                 // convert from 1-indexed positions within the FASTA record 
                 // to 0-indexed offsets within the transcript
@@ -635,7 +714,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                 the_protein.stop_codon[0] = coding_end+1;  // This doesn't have to be handled differently for reverse strand because we've already reversed
                 the_protein.stop_codon[1] = coding_end+2;
                 the_protein.stop_codon[2] = coding_end+3;
-
+                the_protein.cds_seen = true;
             }
 
             Ok("start_codon") => {  // If the protein has one of these entries, check that 

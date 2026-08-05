@@ -47,6 +47,8 @@ pub struct Protein{
     pub isoform_label: String, // text extracted describing the isoform of the protein.  
     pub transcript_label: String,
     // This gets gathered early, and then used later, once we have information about all the proteins in a gene.
+    pub cds_seen: bool, // Whether we have seen a CDS entry for this protein.  If so when we see an exon entry, 
+    // it's the start of a new protein.
 }
 
 impl Default for Protein{
@@ -74,6 +76,7 @@ impl Default for Protein{
             selenocystine: false,
             isoform_label: "".to_string(),
             transcript_label: "".to_string(),
+            cds_seen: false,
         }
     }
 }
