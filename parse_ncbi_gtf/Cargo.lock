@@ -455,6 +455,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "histogram"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ebb5d42df947561c11a73414c53d14c4a0e3193e761a4cdca16ca3d941a2302"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "http"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1032,6 +1041,7 @@ dependencies = [
  "bstr",
  "clap",
  "glob",
+ "histogram",
  "noodles-core",
  "noodles-fasta",
  "noodles-gff",

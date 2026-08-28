@@ -10,7 +10,8 @@ use bstr::{ByteSlice};
 use std::collections::HashMap;
 use std::str;
 use rand::prelude::*;
-
+use histogram::{Histogram, Quantile};  
+const NUM_QUANTILES: usize = 99;
 // Configure command-line arguments
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -189,6 +190,8 @@ fn main() {
     let mut in_protein_coding = false;
     let mut gene_gtf_records = Vec::new();
     let mut isoforms: Vec<u32> = vec![0; 100];
+    let mut intron_lengths: Histogram = Histogram::new(10, 32).expect("Unable to create histogram for intron lengths");
+    let mut exon_lengths: Histogram = Histogram::new(10, 32).expect("Unable to create histogram for exon lengths");
     // If we get here, we've opened both the GTF and FASTA files successfully
     for record_result in gtf_reader.record_bufs() {             
         let the_recbuf = record_result.expect("Unable to get GTF record buffer from file");
@@ -212,6 +215,7 @@ fn main() {
                         else{
                             isoforms[99] +=1;
                         }
+                        count_exon_intron_lengths(&gene, &mut exon_lengths, &mut intron_lengths);
                         count+=write_gene_traindata(gene, &mut out_writer);// Found a valid gene, write the training data for it.
                     },
                     None => {},
@@ -253,6 +257,7 @@ fn main() {
                 else{
                     isoforms[99] +=1;
                 }
+                count_exon_intron_lengths(&gene, &mut exon_lengths, &mut intron_lengths);
                 count+=write_gene_traindata(gene, &mut out_writer);// Found a valid gene, write the training data for it.
             },
             None => {},
@@ -268,6 +273,30 @@ fn main() {
         protein_count += index as u32 * isoforms[index];
     }
     println!("Counted {} genes and {} proteins, average proteins/gene = {}", gene_count, protein_count, protein_count as f32/gene_count as f32);
+    // Create a list of values from 0.1-1.0 in increments of 0.01, and use that to compute quantiles for exon and intron lengths
+    let mut quantiles: [f64; NUM_QUANTILES] = [0.0; NUM_QUANTILES]; 
+    let mut count: f64 = 0.01;
+    for i in 0..NUM_QUANTILES{
+        quantiles[i] = count;
+        count += 0.01;
+    }
+    let exon_quantiles = exon_lengths.quantiles(&quantiles).expect("Unable to compute exon length quantiles").expect("Unable to get quantiles from result");
+    let intron_quantiles: histogram::QuantilesResult = intron_lengths.quantiles(&quantiles).expect("Unable to compute intron length quantiles").expect("Unable to get quantiles from result");
+    
+    println!("Exon length quantiles:");
+    let mut quant = 0.01;
+    while quant < 1.0{
+        let exon_bucket = exon_quantiles.get(&Quantile::new(quant).expect("Unable to create exon quantile")).expect("Unable to get exon quantile");
+        println!("{:.2}, {}", quant, exon_bucket.end());
+        quant += 0.01;
+    }
+    println!("Intron length quantiles:");
+    let mut quant = 0.01;
+    while quant < 1.0{
+        let intron_bucket = intron_quantiles.get(&Quantile::new(quant).expect("Unable to create intron quantile")).expect("Unable to get intron quantile");
+        println!("{:.2}, {}", quant, intron_bucket.end());
+        quant += 0.01;
+    }
 }   
 
 
@@ -338,9 +367,14 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
 
                 the_protein.mrna_start = std::cmp::max(the_protein.mrna_start.saturating_sub(start_padding), 1);
                 the_protein.mrna_end = std::cmp::min(the_protein.mrna_end.saturating_add(end_padding), fasta_record.sequence().len());
+                let frac = (the_protein.mrna_end - the_protein.mrna_start +1) %4;
+                the_protein.mrna_end -= frac; // force the DNA sequence to be a multiple of four residues long
+                assert!((the_protein.mrna_end - the_protein.mrna_start +1) %4 == 0); // check my math
+
                 let start = noodles_core::Position::try_from(the_protein.mrna_start).expect("Couldn't generate Position from mrna_start");
                 let end = noodles_core::Position::try_from(the_protein.mrna_end).expect("Couldn't generate position from mrna_end");
 
+               // println!("Gene {} has transcript length = {}, paddings of {},{}", the_gene.gene_id, seq_length, start_padding, end_padding);
 
                 // Fetch the DNA sequence from the FASTA record
                 match the_gene.strand{
@@ -373,6 +407,7 @@ fn parse_gtf_gene(gtf_records:&Vec<gff::feature::RecordBuf> , ncbi_genomes:&Hash
                         }
                     }
                 }
+                assert!(seq_length < 1000 || the_protein.dna_sequence.len() <= seq_length as usize + seq_length as usize/5);
             }
             
             Ok("transcript") => {
@@ -1778,5 +1813,20 @@ fn reverse_parse_fsm_states(state_vec:&Vec<FsmState>, the_protein: &Protein, the
     }
     else{
       //  println!("FSM state vector matched protein data structure")
+    }
+}
+
+// Count the lengths of all exons and introns in a gene, and add them to the provided vectors
+fn count_exon_intron_lengths(the_gene: &Gene, exon_lengths: &mut Histogram, intron_lengths: &mut Histogram){
+    for i in 0..the_gene.proteins.len(){
+        let the_protein = &the_gene.proteins[i];
+        for j in 0..the_protein.exons.len(){
+            let exon_length = (the_protein.exons[j].end - the_protein.exons[j].start+1) as u64;
+            exon_lengths.increment(exon_length).unwrap();
+            if j < the_protein.exons.len()-1{
+                let intron_length = the_protein.exons[j+1].start - the_protein.exons[j].end-1;
+                intron_lengths.increment(intron_length as u64).unwrap();
+            }
+        }
     }
 }

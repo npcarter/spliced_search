@@ -1,0 +1,25 @@
+\begin{sphinxtheindex}
+\let\bigletter\sphinxstyleindexlettergroup
+\let\spxpagem \sphinxstyleindexpagemain
+\let\spxentry \sphinxstyleindexentry
+\let\spxextra \sphinxstyleindexextra
+
+  \bigletter F
+  \item \spxentry{fsmStateToOneHot()}\spxextra{in module lib.dataloader.trainloader}, \hyperpage{3}
+
+  \indexspace
+  \bigletter L
+  \item \spxentry{lib.dataloader.trainloader}
+    \subitem \spxentry{module}, \hyperpage{3}
+
+  \indexspace
+  \bigletter M
+  \item \spxentry{module}
+    \subitem \spxentry{lib.dataloader.trainloader}, \hyperpage{3}
+
+  \indexspace
+  \bigletter N
+  \item \spxentry{nucleotideToOneHot()}\spxextra{in module lib.dataloader.trainloader}, 
+		\hyperpage{3}
+
+\end{sphinxtheindex}
