@@ -34,3 +34,4 @@ def nucleotideToOneHot(nucleotide):
     oneHot[index] = 1.0
     return torch.tensor(oneHot, dtype=torch.float32)
 
+

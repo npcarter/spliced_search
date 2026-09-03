@@ -1,0 +1,7 @@
+[package]
+name = "hdf5_convert"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hdf5-metno = "0.14.1"
