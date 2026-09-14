@@ -2,7 +2,7 @@
 
 import torch
 
-def fsmStateToOneHot(fsmState):
+def fsm_state_to_one_hot(fsmState):
     """
     Convert a character representing a state in the FSM to a one-hot training vector
     
@@ -19,7 +19,7 @@ def fsmStateToOneHot(fsmState):
     return torch.tensor(oneHot, dtype=torch.float32)
 
 
-def nucleotideToOneHot(nucleotide):
+def nucleotide_to_one_hot(nucleotide):
     """
     Convert a character representing a nucleotide to a one-hot training vector
     
