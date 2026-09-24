@@ -165,9 +165,9 @@ def test_compress_file():
   import tempfile
   import os
   import zarr
+  import shutil
 
   tempdir = tempfile.TemporaryDirectory(delete=False).name
-  print(f"Temporary directory created at {tempdir}")
   input_file_path = os.path.join(tempdir, "input.txt")
   # Create a temporary input file
   with open(input_file_path, "wb") as temp_input:
@@ -181,18 +181,16 @@ def test_compress_file():
   # Create a temporary output file path
   output_file_path = os.path.join(tempdir, "output.zarr")
 
-  try:
-    # Compress the input file
-    compress.compress_file(input_file_path, output_file_path, sequence_chunk_size=8, name_length=10, file_chunk_size=4)
+  # Compress the input file
+  compress.compress_file(input_file_path, output_file_path, sequence_chunk_size=8, name_length=10, file_chunk_size=4)
 
-    # Read the compressed data from the output file using zarr
-    compressed_data = zarr.open(output_file_path, mode='r')
+  # Read the compressed data from the output file using zarr
+  compressed_data = zarr.open(output_file_path, mode='r')
 
-    # Check that the compressed data has the expected shape and dtype
-    assert compressed_data.shape == (6, 18), f"Expected shape (2, 18), got {compressed_data.shape}"
-    assert compressed_data.dtype == np.uint8, f"Expected dtype uint8, got {compressed_data.dtype}"
+  # Check that the compressed data has the expected shape and dtype
+  assert compressed_data.shape == (6, 18), f"Expected shape (6, 18), got {compressed_data.shape}"
+  assert compressed_data.dtype == np.uint8, f"Expected dtype uint8, got {compressed_data.dtype}"
 
-    print("All tests passed for compress_file")
+  print("All tests passed for compress_file")
 
-  finally:
-    print("Cleaning up temporary files...")
+  shutil.rmtree(tempdir)

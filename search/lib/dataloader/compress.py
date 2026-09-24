@@ -287,7 +287,7 @@ def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, 
     shape = (0, sequence_chunk_size + name_length),
     chunks = (file_chunk_size, sequence_chunk_size + name_length),
     dtype = np.uint8,
-    mode = 'a'
+    mode = 'w'
   )
 
   index = 0
@@ -312,9 +312,7 @@ def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, 
             index = 0
       line_count = (line_count + 1) %3
 
-  print(index)
   if index > 0: #There was a partial chunk at the end of the file, so write it to the output file
-    print(outchunk.shape)
     outfile.append(outchunk[:index, :])
 
 
