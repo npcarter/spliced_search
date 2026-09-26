@@ -11,8 +11,8 @@ if __name__ == "__main__":
 
     parser.add_argument("input_file_path")
     parser.add_argument("output_file_path")
-    parser.add_argument("--chunk", required=False, default=16384)
-    parser.add_argument("--nl", required=False, default=40)
+    parser.add_argument("--chunk", required=False, default=16384, type=int)
+    parser.add_argument("--nl", required=False, default=40, type=int)
 
     args = parser.parse_args()
     

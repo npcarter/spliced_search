@@ -255,12 +255,10 @@ def split_sequence_into_chunks(name, sequence, fsmStates, chunk_size=16384, name
   if len(sequence) < chunk_size:
     new_seq = sequence.ljust(chunk_size, 'Z')
     new_fsm = fsmStates.ljust(chunk_size, '0')
-    new_name = f"{name}_0".ljust(name_length)
-    if len(new_name) > name_length:
-      raise ValueError(f"Chunk name '{new_name}' exceeds the specified name length of {name_length}.")
+    new_name = _make_chunk_name(name, 0, name_length)
     return([(new_name, new_seq, new_fsm)])
 
-  
+
   for i in range(0, len(sequence), chunk_size):
     if i + chunk_size < len(sequence):
       seq_chunk = sequence[i:i + chunk_size]
@@ -268,13 +266,24 @@ def split_sequence_into_chunks(name, sequence, fsmStates, chunk_size=16384, name
     else:
       seq_chunk = sequence[len(sequence)-chunk_size:]
       fsm_chunk = fsmStates[len(fsmStates)-chunk_size:]
-    new_name = f"{name}_{i//chunk_size}".ljust(name_length)
-    if len(new_name) > name_length:
-      raise ValueError(f"Chunk name '{new_name}' exceeds the specified name length of {name_length}.")
+    new_name = _make_chunk_name(name, i // chunk_size, name_length)
     chunks.append((new_name, seq_chunk, fsm_chunk))
 
-  
+
   return chunks
+
+def _make_chunk_name(name, chunk_number, name_length):
+  """
+  Builds a chunk name in the form "{name}_{chunk_number}" padded with spaces to name_length.
+  If the suffix alone doesn't fit within name_length, raises ValueError. Otherwise, name is
+  truncated as needed to leave room for the suffix, since the suffix must always be present
+  to keep chunk names unique.
+  """
+  suffix = f"_{chunk_number}"
+  if len(suffix) > name_length:
+    raise ValueError(f"Chunk suffix '{suffix}' alone exceeds the specified name length of {name_length}.")
+  truncated_name = name[:name_length - len(suffix)]
+  return f"{truncated_name}{suffix}".ljust(name_length)
 
 def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, name_length=40, file_chunk_size=1024):
   """
