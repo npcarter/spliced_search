@@ -301,7 +301,6 @@ def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, 
 
   index = 0
   with open(input_file_path, 'r') as infile:
-
     line_count = 0
     outchunk = np.zeros((file_chunk_size, sequence_chunk_size + name_length), dtype=np.uint8)
     for line in infile:

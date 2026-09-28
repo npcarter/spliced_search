@@ -1,8 +1,25 @@
 # trainloader.py -- functions for reading training data from disk and creating minibatches for training
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from . import compress
+
+_FSM_STATE_TO_ONE_HOT_LOOKUP = torch.tensor([[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                                            [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                                            [0,0,1,0,0,0,0,0,0,0,0,0,0,0,0],
+                                            [0,0,0,1,0,0,0,0,0,0,0,0,0,0,0],
+                                            [0,0,0,0,1,0,0,0,0,0,0,0,0,0,0],
+                                            [0,0,0,0,0,1,0,0,0,0,0,0,0,0,0],
+                                            [0,0,0,0,0,0,1,0,0,0,0,0,0,0,0],
+                                            [0,0,0,0,0,0,0,1,0,0,0,0,0,0,0],
+                                            [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0],
+                                            [0,0,0,0,0,0,0,0,0,1,0,0,0,0,0],
+                                            [0,0,0,0,0,0,0,0,0,0,1,0,0,0,0],
+                                            [0,0,0,0,0,0,0,0,0,0,0,1,0,0,0],
+                                            [0,0,0,0,0,0,0,0,0,0,0,0,1,0,0],
+                                            [0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+                                            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+                                            ], dtype=torch.float)
 
 def fsm_state_to_one_hot(fsmState):
     """
@@ -13,13 +30,13 @@ def fsm_state_to_one_hot(fsmState):
     Returns "None" if the input is not a valid state character
  
     """
-    if fsmState not in "0123456789ABCDE":
-        return None
-    oneHot = [0.0] * 15
+    #if fsmState not in "0123456789ABCDE":
+     #   return None
+    #oneHot = [0.0] * 15
     index = "0123456789ABCDE".index(fsmState)
-    oneHot[index] = 1.0
-    return torch.tensor(oneHot, dtype=torch.float32)
-
+    #oneHot[index] = 1.0
+    #return torch.tensor(oneHot, dtype=torch.float32)
+    return _FSM_STATE_TO_ONE_HOT_LOOKUP[index]
 
 def nucleotide_to_one_hot(nucleotide):
     """
@@ -118,13 +135,15 @@ class TrainDataset(Dataset):
             raise ValueError(f"Attempted to fetch training sample {idx}. Sample indices must be between 0 and {self.num_samples}.")
         compressed_item = self.zarr_data[idx]
         (name, sequence, fsm_states) = compress.decompress_chunk(compressed_item, self.sequence_length, self.name_length)
-        sequence_onehot = []
-        for nucleotide in sequence:
-            sequence_onehot.append(nucleotide_to_one_hot(nucleotide))
+        sequence_onehot = 0
+    #    sequence_onehot = torch.empty(len(sequence), 4)
 
-        fsm_states_onehot = []
-        for state in fsm_states:
-            fsm_states_onehot.append(fsm_state_to_one_hot(state))
+     #   for index, nucleotide in enumerate(sequence):
+      #      sequence_onehot[index] =nucleotide_to_one_hot(nucleotide)
+        fsm_states_onehot = torch.vmap(fsm_state_to_one_hot, in_dims = 0)(torch.tensor(sequence))
+       # fsm_states_onehot = torch.empty(len(sequence), 15)
+        #for index, state in enumerate(fsm_states):
+         #   fsm_states_onehot[index] = fsm_state_to_one_hot(state)
 
         return(name, sequence_onehot, fsm_states_onehot)
 

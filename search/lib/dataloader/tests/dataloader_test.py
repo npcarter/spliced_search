@@ -99,7 +99,7 @@ def test_TrainDataset():
         assert torch.equal(sequence[5], torch.tensor([0.0, 0.0, 0.0, 1.0])), "Wrong value returned for position 5 of item 3 sequence in test_TrainDataset"
         assert torch.equal(sequence[6], torch.tensor([0.0, 1.0, 0.0, 0.0])), "Wrong value returned for position 6 of item 3 sequence in test_TrainDataset"
         assert torch.equal(sequence[7], torch.tensor([1.0, 0.0, 0.0, 0.0])), "Wrong value returned for position 7 of item 3 sequence in test_TrainDataset"
-
+        print(states[0])
         assert torch.equal(states[0], torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])), "Wrong FSM states returned for position 0 of item 3 in test_TrainDataset"
         assert torch.equal(states[1], torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])), "Wrong FSM states returned for position 1 of item 3 in test_TrainDataset"
         assert torch.equal(states[2], torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])), "Wrong FSM states returned for position 2 of item 3 in test_TrainDataset"
