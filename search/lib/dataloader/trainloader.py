@@ -30,14 +30,25 @@ def fsm_state_to_one_hot(fsmState):
     Returns "None" if the input is not a valid state character
  
     """
-    #if fsmState not in "0123456789ABCDE":
-     #   return None
-    #oneHot = [0.0] * 15
-    index = "0123456789ABCDE".index(fsmState)
-    #oneHot[index] = 1.0
-    #return torch.tensor(oneHot, dtype=torch.float32)
-    return _FSM_STATE_TO_ONE_HOT_LOOKUP[index]
+    return _FSM_STATE_TO_ONE_HOT_LOOKUP[fsmState]
 
+_NUCLEOTIDE_TO_ONE_HOT_LOOKUP = torch.tensor([[1.0, 0.0, 0.0, 0.0], #A
+                                             [0.0, 1.0, 0.0, 0.0], #C
+                                             [0.0, 0.0, 1.0, 0.0], #G
+                                             [0.0, 0.0, 0.0, 1.0], #T
+                                             [0.0, 0.333, 0.333, 0.333], #B
+                                             [0.333, 0.0, 0.333, 0.333], #D
+                                             [0.333, 0.333, 0.0, 0.333], #H
+                                             [0.0, 0.0, 0.5, 0.5], #K
+                                             [0.5, 0.5, 0.0, 0.0], #m
+                                             [0.25, 0.25, 0.25, 0.25], #N/X        
+                                             [0.5, 0.0, 0.5, 0.0], #R
+                                             [0.0, 0.5, 0.5, 0.0], #S
+                                             [0.333, 0.333, 0.333, 0.0], #V
+                                             [0.5, 0.0, 0.0, 0.5], #W
+                                             [0.0, 0.5, 0.0, 0.5], #Y
+                                             [0.0, 0.0, 0.0, 0.0] #Z
+                                            ], dtype = torch.float)
 def nucleotide_to_one_hot(nucleotide):
     """
     Convert a character representing a nucleotide to a one-hot training vector
@@ -46,59 +57,7 @@ def nucleotide_to_one_hot(nucleotide):
     Returns a one-hot tensor of float32 values, with 1.0 in the position corresponding to the nucleotide, and 0.0 elsewhere
     Returns "None" if the input is not a valid nucleotide character
     """
-    oneHot = [0.0] * 4
-    match nucleotide:
-        case 'A':
-            oneHot[0] = 1.0
-        case 'C':
-            oneHot[1] = 1.0   
-        case 'T':
-            oneHot[2] = 1.0
-        case 'G':
-            oneHot[3] = 1.0
-        case 'B':
-            oneHot[1] = 0.333
-            oneHot[2] = 0.333
-            oneHot[3] = 0.333
-        case 'D':
-            oneHot[0] = 0.333
-            oneHot[2] = 0.333
-            oneHot[3] = 0.333
-        case 'H':
-            oneHot[0] = 0.333
-            oneHot[1] = 0.333
-            oneHot[2] = 0.333
-        case 'V':
-            oneHot[0] = 0.333
-            oneHot[1] = 0.333
-            oneHot[3] = 0.333
-        case 'K':
-            oneHot[2] = 0.5
-            oneHot[3] = 0.5          
-        case 'M':
-            oneHot[0] = 0.5
-            oneHot[1] = 0.5         
-        case 'R':
-            oneHot[0] = 0.5
-            oneHot[3] = 0.5         
-        case 'S':
-            oneHot[1] = 0.5
-            oneHot[3] = 0.5         
-        case 'W':
-            oneHot[0] = 0.5
-            oneHot[2] = 0.5         
-        case 'Y':
-            oneHot[1] = 0.5
-            oneHot[2] = 0.5
-        case 'N' | 'X':
-            oneHot[0] = 0.25
-            oneHot[1] = 0.25
-            oneHot[2] = 0.25
-            oneHot[3] = 0.25
-        case _:
-            return None
-    
-    return torch.tensor(oneHot, dtype=torch.float32)
+    return _NUCLEOTIDE_TO_ONE_HOT_LOOKUP[nucleotide]
 
 class TrainDataset(Dataset):
     """
@@ -135,15 +94,9 @@ class TrainDataset(Dataset):
             raise ValueError(f"Attempted to fetch training sample {idx}. Sample indices must be between 0 and {self.num_samples}.")
         compressed_item = self.zarr_data[idx]
         (name, sequence, fsm_states) = compress.decompress_chunk(compressed_item, self.sequence_length, self.name_length)
-        sequence_onehot = 0
-    #    sequence_onehot = torch.empty(len(sequence), 4)
 
-     #   for index, nucleotide in enumerate(sequence):
-      #      sequence_onehot[index] =nucleotide_to_one_hot(nucleotide)
-        fsm_states_onehot = torch.vmap(fsm_state_to_one_hot, in_dims = 0)(torch.tensor(sequence))
-       # fsm_states_onehot = torch.empty(len(sequence), 15)
-        #for index, state in enumerate(fsm_states):
-         #   fsm_states_onehot[index] = fsm_state_to_one_hot(state)
+        sequence_onehot = torch.vmap(nucleotide_to_one_hot, in_dims = 0)(sequence)
+        fsm_states_onehot = torch.vmap(fsm_state_to_one_hot, in_dims = 0)(fsm_states)
 
         return(name, sequence_onehot, fsm_states_onehot)
 

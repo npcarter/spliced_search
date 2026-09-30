@@ -1,6 +1,8 @@
 import torch
 from torch.utils.data import DataLoader
 from lib.dataloader import trainloader
+from lib.model.fc_model import TwoLayerFC
+from lib.loss.loss import TiberiusLoss
 import argparse
 
 parser = argparse.ArgumentParser(description='Top-level training loop')
@@ -30,7 +32,7 @@ def synchronize_device(device):
 
 def main(args):
   device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-  if device != "cuda": #pinning memory isn't supported on mps
+  if device.type != "cuda": #pinning memory isn't supported on mps
      pin_memory = False
   else:
      pin_memory = args.pin_memory
@@ -39,17 +41,25 @@ def main(args):
   train_loader = DataLoader(the_dataset, batch_size=args.batch_size, shuffle=args.shuffle, num_workers=args.num_workers,
                                 pin_memory=pin_memory, drop_last=args.drop_last)#, prefetch_factor=args.prefetch_factor)
 
-  found_names = {}
+  model = TwoLayerFC(sequence_length=args.sequence_length).to(device)
+  loss_fn = TiberiusLoss(use_f1=True, f1_factor=2.0)
+  optimizer = torch.optim.Adam(model.parameters(), lr=1e-13)
+  first_run = True
   for epoch in range(epochs):
+    model.train()
     for batch_idx, (names, sequences, labels) in enumerate(train_loader):
-      sequences.to(device)
-      labels.to(device)
-      for name in names:
-        #print(f"{batch_idx} {name}")
-        assert name not in found_names, "repeat name {name} found"
-        found_names[name] = 1
-      print(batch_idx)
-      print(names[0])
+      sequences_device = sequences.to(device, non_blocking=True)
+      labels_device =labels.to(device, non_blocking=True)
+      logits_device = model.forward(sequences_device)
+      loss = loss_fn.forward(logits_device, labels_device)
+      if first_run:
+         print(f"Starting loss {loss}")
+         first_run = False
+      optimizer.zero_grad()
+      loss.backward()
+      torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+      optimizer.step()
+    print(f"Loss after epoch {epoch} was {loss}")
   synchronize_device(device)
 
 if __name__=='__main__':

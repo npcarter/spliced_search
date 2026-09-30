@@ -92,18 +92,13 @@ class TiberiusLoss(nn.Module):
         :param targets_onehot: The FSM state that each nucleotide should be in if predicted properly. Should be a 2-D tensor of dimensions 
             sequence_length x 15, where each column is a one-hot vector with the position corresponding to the correct FSM state set to 1.0
         """
-        print("starting forward")
-        print(f"targets_onehot = {targets_onehot}")
-        print(f"predictions_fifteenstate = {predictions_fifteenstate}")
         #first, compute the categorical cross-entropy of the predictions
         targets = self._reduce_states(targets_onehot)
         targets_flat = targets.reshape(-1)
         predictions = self._reduce_logits(predictions_fifteenstate)
         predictions_flat = predictions.reshape(-1, predictions.shape[-1])
         cce_loss = nn.functional.cross_entropy(predictions_flat, targets_flat, reduction='mean')
-        print(f"targets_flat = {targets_flat}")
-        print(f"predictions_flat = {predictions_flat}")
-        print(f"cce_loss = {cce_loss}")
+        
         if self.use_f1:
             # Find the number of sequence positions that held codons
             true_codons = torch.where(targets > 1, 1, 0) # states 2-4 in the five-state rep are coding 

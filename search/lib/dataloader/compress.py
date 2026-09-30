@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import zarr
 
 def fsm_char_to_nybble(char):
@@ -205,7 +206,8 @@ def compress_chunk(name, sequence, fsmStates, sequence_chunk_size=16384, name_le
 def decompress_chunk(compressed_data, sequence_chunk_size=16384, name_length=40):
   """
   Decompresses the compressed training data back into its original components: name, sequence, and FSM states.  
-  The function takes a numpy array of type uint8 containing the compressed data and returns a tuple containing the name (string), sequence (string), and FSM states (string).  
+  The function takes a numpy array of type uint8 containing the compressed data and returns a tuple containing the 
+  name (string), sequence (tensor of int8), and FSM states (tensor of int8).  
   """
 
   if len(compressed_data) != sequence_chunk_size + name_length:
@@ -219,25 +221,19 @@ def decompress_chunk(compressed_data, sequence_chunk_size=16384, name_length=40)
   # Extract the compressed sequence and FSM states
   compressed_sequence_fsm = compressed_data[name_length:name_length + sequence_chunk_size]
 
-  sequence = []
-  fsm_states = []
+  # These tensors are ints, not int8 because we need them to be in order to use their elements as indices
+  # when converting to one-hot.
+  sequence = torch.empty(len(compressed_sequence_fsm), dtype=torch.int)
+  fsm_states = torch.empty(len(compressed_sequence_fsm), dtype=torch.int)
 
-  for byte in compressed_sequence_fsm:
+  for index, byte in enumerate(compressed_sequence_fsm):
     nucleotide_nybble = (byte >> 4) & 0x0F
     fsm_nybble = byte & 0x0F
 
-    nucleotide_char = dna_nybble_to_char(nucleotide_nybble)
-    fsm_char = fsm_nybble_to_char(fsm_nybble)
+    sequence[index] = nucleotide_nybble
+    fsm_states[index] = fsm_nybble
 
-    if nucleotide_char is None:
-      raise ValueError(f"Invalid nucleotide nybble value '{nucleotide_nybble}' in compressed data.")
-    if fsm_char is None:
-      raise ValueError(f"Invalid FSM state nybble value '{fsm_nybble}' in compressed data.")
-
-    sequence.append(nucleotide_char)
-    fsm_states.append(fsm_char)
-
-  return name, ''.join(sequence), ''.join(fsm_states)
+  return name, sequence, fsm_states
 
 def split_sequence_into_chunks(name, sequence, fsmStates, chunk_size=16384, name_length=40):
   """

@@ -1,4 +1,5 @@
 from .. import compress
+import torch
 import numpy as np
 def test_fsm_char_to_nybble():
   for state in "0123456789ABCDE":
@@ -104,8 +105,8 @@ def test_decompress_chunk():
   compressed = np.append(compressed, 0x37)
   decompressed_name, decompressed_sequence, decompressed_fsmStates = compress.decompress_chunk(compressed, sequence_chunk_size=8, name_length=5)
   assert decompressed_name == name, f"Decompressed name '{decompressed_name}' does not match original '{name}'"
-  assert decompressed_sequence == sequence, f"Decompressed sequence '{decompressed_sequence}' does not match original '{sequence}'"
-  assert decompressed_fsmStates == fsmStates, f"Decompressed FSM states '{decompressed_fsmStates}' do not match original '{fsmStates}'"
+  assert torch.equal(decompressed_sequence, torch.tensor([0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.uint8)), f"Decompressed sequence '{decompressed_sequence}' does not match original '{sequence}'"
+  assert torch.equal(decompressed_fsmStates, torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8)), f"Decompressed FSM states '{decompressed_fsmStates}' do not match original '{fsmStates}'"
   print("All tests passed for decompress_sequence")
 
 def test_compress_chunk_and_decompress_chunk():
@@ -121,8 +122,8 @@ def test_compress_chunk_and_decompress_chunk():
 
   # Verify that the decompressed data matches the original data
   assert decompressed_name == name, f"Decompressed name '{decompressed_name}' does not match original '{name}'"
-  assert decompressed_sequence == sequence, f"Decompressed sequence '{decompressed_sequence}' does not match original '{sequence}'"
-  assert decompressed_fsmStates == fsmStates, f"Decompressed FSM states '{decompressed_fsmStates}' do not match original '{fsmStates}'"
+  assert torch.equal(decompressed_sequence, torch.tensor([0, 1, 2, 3, 0, 1, 2, 3], dtype=torch.uint8)), f"Decompressed sequence '{decompressed_sequence}' does not match original '{sequence}'"
+  assert torch.equal(decompressed_fsmStates, torch.tensor([0, 1, 2, 3, 4, 5, 6, 7], dtype=torch.uint8)), f"Decompressed FSM states '{decompressed_fsmStates}' do not match original '{fsmStates}'"
 
   print("All tests passed for compress_sequence_and_decompress_sequence")
 
