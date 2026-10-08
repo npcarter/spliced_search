@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import zarr
+import random
 
 def fsm_char_to_nybble(char):
   """
@@ -161,7 +162,7 @@ def dna_nybble_to_char(nybble):
     case _:
       return None
 
-def compress_chunk(name, sequence, fsmStates, sequence_chunk_size=16384, name_length=40):
+def compress_chunk(name, sequence, fsmStates, sequence_chunk_size=16384, name_length=40, validate=0.10, test=0.01):
   """
   Converts the strings representing a chunk of sequence's name, DNA sequence, and FSM states 
   into a vector of bytes in compressed format.  
@@ -203,6 +204,12 @@ def compress_chunk(name, sequence, fsmStates, sequence_chunk_size=16384, name_le
   assert compressed_data.shape[0] == name_length + sequence_chunk_size, f"Compressed data length {compressed_data.shape[0]} does not match expected length {name_length + sequence_chunk_size}"
   return compressed_data
 
+def get_nucleotide_nybble(compressed_byte):
+  return (compressed_byte >> 4) &0x0f
+
+def get_sequence_nybble(compressed_byte):
+  return compressed_byte & 0x0f
+
 def decompress_chunk(compressed_data, sequence_chunk_size=16384, name_length=40):
   """
   Decompresses the compressed training data back into its original components: name, sequence, and FSM states.  
@@ -223,15 +230,17 @@ def decompress_chunk(compressed_data, sequence_chunk_size=16384, name_length=40)
 
   # These tensors are ints, not int8 because we need them to be in order to use their elements as indices
   # when converting to one-hot.
-  sequence = torch.empty(len(compressed_sequence_fsm), dtype=torch.int)
-  fsm_states = torch.empty(len(compressed_sequence_fsm), dtype=torch.int)
 
-  for index, byte in enumerate(compressed_sequence_fsm):
-    nucleotide_nybble = (byte >> 4) & 0x0F
-    fsm_nybble = byte & 0x0F
 
-    sequence[index] = nucleotide_nybble
-    fsm_states[index] = fsm_nybble
+  sequence = torch.vmap(get_nucleotide_nybble)(compressed_sequence_fsm)
+  fsm_states = torch.vmap(get_sequence_nybble)(compressed_sequence_fsm)
+
+ # for index, byte in enumerate(compressed_sequence_fsm):
+ #   nucleotide_nybble = (byte >> 4) & 0x0F
+ #   fsm_nybble = byte & 0x0F
+
+  #  sequence[index] = nucleotide_nybble
+   # fsm_states[index] = fsm_nybble
 
   return name, sequence, fsm_states
 
@@ -281,24 +290,50 @@ def _make_chunk_name(name, chunk_number, name_length):
   truncated_name = name[:name_length - len(suffix)]
   return f"{truncated_name}{suffix}".ljust(name_length)
 
-def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, name_length=40, file_chunk_size=1024):
+def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, name_length=40, file_chunk_size=1024, validate=0.10, test=0.01):
   """
   Compresses the contents of a file containing training data and writes the compressed data to an output file in Zarr format.  Each sequence in the input file is expected to be represented by three lines: the first line contains the name of the sequence, the second line contains the DNA sequence, and the third line contains the FSM states.  The function reads each sequence from the input file, calls SplitSequenceIntoChunks to split the sequence into chunks of the specified size, and then calls CompressSequence to compress each chunk.  The compressed data for each chunk is written to the output file in Zarr format.  The function does not perform any validation of the input file.
   """
+  assert (validate+test < 1.0), "validate fraction + test fraction must be less than 1" 
   line_count = 0
-  
-  outfile = zarr.open(
-    store = output_file_path,
+  base_outfile = output_file_path+".train"
+  validate_outfile = output_file_path+".validate"
+  test_outfile = output_file_path+".test"
+
+  base_outfile = zarr.open(
+    store = base_outfile,
     shape = (0, sequence_chunk_size + name_length),
     chunks = (file_chunk_size, sequence_chunk_size + name_length),
     dtype = np.uint8,
     mode = 'w'
   )
 
-  index = 0
+  validate_outfile = zarr.open(
+    store = validate_outfile,
+    shape = (0, sequence_chunk_size + name_length),
+    chunks = (file_chunk_size, sequence_chunk_size + name_length),
+    dtype = np.uint8,
+    mode = 'w'
+  )
+
+  test_outfile = zarr.open(
+    store = test_outfile,
+    shape = (0, sequence_chunk_size + name_length),
+    chunks = (file_chunk_size, sequence_chunk_size + name_length),
+    dtype = np.uint8,
+    mode = 'w'
+  )
+
+  base_index = 0
+  validate_index = 0
+  test_index = 0
+
   with open(input_file_path, 'r') as infile:
     line_count = 0
-    outchunk = np.zeros((file_chunk_size, sequence_chunk_size + name_length), dtype=np.uint8)
+    base_outchunk = np.zeros((file_chunk_size, sequence_chunk_size + name_length), dtype=np.uint8)
+    validate_outchunk =  np.zeros((file_chunk_size, sequence_chunk_size + name_length), dtype=np.uint8)
+    test_outchunk = np.zeros((file_chunk_size, sequence_chunk_size + name_length), dtype=np.uint8)
+
     for line in infile:
       if line_count == 0:
         name = line.rstrip('\n')
@@ -309,16 +344,35 @@ def compress_file(input_file_path, output_file_path, sequence_chunk_size=16384, 
         chunks = split_sequence_into_chunks(name, sequence, fsmStates, chunk_size=sequence_chunk_size, name_length=name_length)
         for chunk in chunks:
           compressed_chunk = compress_chunk(chunk[0], chunk[1], chunk[2], sequence_chunk_size=sequence_chunk_size, name_length=name_length)
-          outchunk[index, :] = compressed_chunk
-          index += 1
-          if index == file_chunk_size:
-            outfile.append(outchunk)
-            index = 0
+          split = random.random()
+          if split < test: # chunk goes in test set
+            test_outchunk[test_index, :] = compressed_chunk
+            test_index += 1
+            if test_index == file_chunk_size:
+              test_outfile.append(test_outchunk)
+              test_index = 0
+          elif split < validate + test: # chunk goes in validate set
+            validate_outchunk[validate_index, :] = compressed_chunk
+            validate_index += 1
+            if validate_index == file_chunk_size:
+              validate_outfile.append(validate_outchunk)
+              validate_index = 0
+          else:
+            base_outchunk[base_index, :] = compressed_chunk
+            base_index += 1
+            if base_index == file_chunk_size:
+              base_outfile.append(base_outchunk)
+              base_index = 0
       line_count = (line_count + 1) %3
 
-  if index > 0: #There was a partial chunk at the end of the file, so write it to the output file
-    outfile.append(outchunk[:index, :])
+  if base_index > 0: #There was a partial chunk at the end of the file, so write it to the output file
+    base_outfile.append(base_outchunk[:base_index, :])
 
+  if validate_index > 0: #There was a partial chunk at the end of the file, so write it to the output file
+    validate_outfile.append(validate_outchunk[:validate_index, :])
+
+  if test_index > 0: #There was a partial chunk at the end of the file, so write it to the output file
+    test_outfile.append(test_outchunk[:test_index, :])
 
 
     
